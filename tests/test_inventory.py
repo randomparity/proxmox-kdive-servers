@@ -52,7 +52,14 @@ class TestValidation(unittest.TestCase):
             "ansible_host": ["", "::1", "127.0.0.1", "224.0.0.1", "192.0.2.0", 1],
             "ipv4_cidr": ["", "192.0.2.12/24", "192.0.2.11", "192.0.2.11/33", None],
             "gateway": ["", "192.0.3.1", "192.0.2.11", "192.0.2.255", None],
-            "dns_servers": [[], "192.0.2.53", ["invalid"], [True], ["0.0.0.0"]],
+            "dns_servers": [
+                [],
+                "192.0.2.53",
+                ["invalid"],
+                [True],
+                ["0.0.0.0"],
+                ["255.255.255.255"],
+            ],
             "ssh_public_keys": [[], "ssh-ed25519 AAAA", ["invalid"], ["ssh-ed25519 AAAA"]],
         }
         for field, values in cases.items():
