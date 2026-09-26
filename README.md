@@ -91,7 +91,8 @@ The broad sizing bound prevents malformed inputs; it is not a Proxmox capacity c
 
 Credential names are checked without reading their environment values. There is no
 need to set them for offline checks. Recognizable plaintext API credentials and
-Ansible password variables are rejected; unrelated Ansible variables are preserved.
+Ansible SSH/sudo/su passwords, inline private keys and passphrases are rejected;
+unrelated Ansible variables are preserved. Private-key file references remain usable.
 This does not sanitize arbitrary private data or sandbox trusted inventory/plugins.
 Public-key checks cover encoding/structure, not key ownership or successful login.
 Do not put private keys in `ssh_public_keys`.

@@ -28,6 +28,13 @@ PLAINTEXT_CREDENTIALS = {
     "ansible_ssh_pass",
     "ansible_become_password",
     "ansible_become_pass",
+    "ansible_ssh_password",
+    "ansible_sudo_pass",
+    "ansible_su_pass",
+    "ansible_private_key",
+    "ansible_ssh_private_key",
+    "ansible_private_key_passphrase",
+    "ansible_ssh_private_key_passphrase",
 }
 
 
