@@ -71,8 +71,8 @@ def ipv4(value, field):
         raise ValidationError(f"{field}: supply an IPv4 address") from None
     require(
         not (
-            address == ipaddress.IPv4Address("255.255.255.255")
-            or address.is_unspecified
+            address in ipaddress.IPv4Network("0.0.0.0/8")
+            or address.is_reserved
             or address.is_multicast
             or address.is_loopback
             or address.is_link_local

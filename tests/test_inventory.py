@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.validate_inventory import ValidationError, load_inventory, validate_inventory
+from scripts.validate_inventory import ValidationError, ipv4, load_inventory, validate_inventory
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "inventory/example.yml"
@@ -121,6 +121,12 @@ class TestValidation(unittest.TestCase):
         for selection in ["", "all", "*", "missing", "ubuntu_local,", "ubuntu_local,ubuntu_local"]:
             with self.subTest(selection=selection), self.assertRaises(ValidationError):
                 validate_inventory(self.data, selection)
+
+    def test_special_networks_are_rejected(self):
+        for field in ["ansible_host", "gateway", "dns_servers"]:
+            for value in ["0.0.0.11", "240.0.0.11"]:
+                with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
+                    ipv4(value, field)
 
     def test_integer_boundaries_and_small_subnet(self):
         for field in ["cores", "memory_mib", "disk_gib"]:
