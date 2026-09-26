@@ -193,6 +193,12 @@ class TestCLI(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn(folder, result.stderr)
 
+    def test_path_stat_failure_is_safe(self):
+        result = self.run_cli("--inventory", "PRIVATE_SENTINEL" * 25 + ".yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("PRIVATE_SENTINEL", result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+
     def test_environment_references_are_not_resolved(self):
         result = self.run_cli(env={"PROXMOX_API_TOKEN_SECRET": "SECRET_SENTINEL"})
         self.assertEqual(result.returncode, 0, result.stderr)

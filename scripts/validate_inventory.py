@@ -247,8 +247,14 @@ def validate_inventory(data, targets=None):
 
 def load_inventory(path):
     path = Path(path)
+    try:
+        valid_file = path.suffix in {".yml", ".yaml"} and path.is_file()
+    except OSError:
+        raise ValidationError(
+            "inventory: cannot inspect source file; check path and permissions"
+        ) from None
     require(
-        path.suffix in {".yml", ".yaml"} and path.is_file(),
+        valid_file,
         "inventory",
         "supply an existing static .yml or .yaml inventory file",
     )
