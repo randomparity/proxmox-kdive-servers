@@ -1,0 +1,13 @@
+---
+- name: Validate inventory on the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Check private inventory without exposing its contents
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ playbook_dir }}/../scripts/validate_inventory.py"
+      changed_when: false
+      no_log: true

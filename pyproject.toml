@@ -1,0 +1,22 @@
+[project]
+name = "proxmox-kdive-servers"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "ansible-core==2.21.4",
+  "ansible-lint==26.9.0",
+  "pre-commit==4.6.2",
+  "ruff==0.16.9",
+]
+
+[tool.uv]
+package = false
+link-mode = "copy"
+required-version = "==0.12.19"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

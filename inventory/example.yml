@@ -1,0 +1,42 @@
+---
+all:
+  children:
+    kdive:
+      vars:
+        proxmox_api_host: pve.example.invalid
+        proxmox_api_port: 8006
+        proxmox_node: example-node
+        api_user_env: PROXMOX_API_USER
+        api_token_id_env: PROXMOX_API_TOKEN_ID
+        api_token_secret_env: PROXMOX_API_TOKEN_SECRET
+        storage: example-storage
+        bridge: vmbr0
+        ansible_user: example-user
+        gateway: 192.0.2.1
+        dns_servers: [192.0.2.53]
+        ssh_public_keys:
+          - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMFt8b71VD6VGT3G58OYzLwj3buASlbpik4MkyDgYlHM anonymous-example
+        cores: 2
+        memory_mib: 4096
+        disk_gib: 32
+      hosts:
+        ubuntu_local:
+          profile: ubuntu
+          vmid: 1101
+          ansible_host: 192.0.2.11
+          ipv4_cidr: 192.0.2.11/24
+        fedora_remote:
+          profile: fedora
+          vmid: 1102
+          ansible_host: 192.0.2.12
+          ipv4_cidr: 192.0.2.12/24
+        rocky_local:
+          profile: rocky
+          vmid: 1103
+          ansible_host: 192.0.2.13
+          ipv4_cidr: 192.0.2.13/24
+        opensuse_remote:
+          profile: opensuse
+          vmid: 1104
+          ansible_host: 192.0.2.14
+          ipv4_cidr: 192.0.2.14/24

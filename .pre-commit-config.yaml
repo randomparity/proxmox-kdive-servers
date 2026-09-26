@@ -1,0 +1,10 @@
+---
+repos:
+  - repo: local
+    hooks:
+      - id: offline-checks
+        name: Offline controller checks
+        entry: env -u INVENTORY -u TARGETS make check
+        language: system
+        pass_filenames: false
+        always_run: true
