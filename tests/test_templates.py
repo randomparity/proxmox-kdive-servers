@@ -310,6 +310,35 @@ class TestLifecycle(unittest.TestCase):
             self.assertIsNone(self.native.config)
             self.native.image_info = original
 
+    def test_download_deadline_interrupts_blocking_read(self):
+        import io
+        import signal
+        import time
+        from unittest.mock import patch
+
+        class SlowResponse(io.BytesIO):
+            def geturl(self):
+                return "https://vendor.invalid/image"
+
+            def read(self, size):
+                # Model a socket read that keeps receiving data past the total deadline.
+                time.sleep(0.2)
+                return super().read(size)
+
+        source = SlowResponse(self.payload)
+        handler = signal.getsignal(signal.SIGALRM)
+        with (
+            patch.object(self.host, "DOWNLOAD_TIMEOUT", 0.03, create=True),
+            patch("scripts.template_host.urllib.request.urlopen", return_value=source),
+            self.assertRaisesRegex(self.host.TemplateError, "deadline"),
+        ):
+            self.host.run(self.request)
+        self.assertIsNone(self.native.config)
+        self.assertEqual(list(self.host.CACHE.iterdir()), [])
+        self.assertTrue(source.closed)
+        self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+
     def test_incomplete_running_or_malformed_state_never_recovers(self):
         self.host.run(self.request)
         self.native.config["description"] = self.native.config["description"].replace(

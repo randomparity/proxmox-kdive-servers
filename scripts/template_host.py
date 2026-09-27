@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from pathlib import Path
 
 CACHE = Path("/var/cache/kdive-templates")
 LOCKS = Path("/run/lock/kdive-templates")
+DOWNLOAD_TIMEOUT = 900
 FIXED = {
     "cores": "2",
     "memory": "2048",
@@ -194,6 +196,9 @@ def inspect_image(path, image):
 
 
 def cached_image(image):
+    def deadline_expired(signum, frame):
+        raise TemplateError("Image download exceeded deadline; retry vendor access")
+
     private_directory(CACHE)
     destination = CACHE / (image["sha256"] + ".qcow2")
     if destination.exists() or destination.is_symlink():
@@ -202,18 +207,21 @@ def cached_image(image):
     fd, temporary = tempfile.mkstemp(dir=CACHE, prefix="download-")
     path = Path(temporary)
     try:
-        started = time.monotonic()
         with os.fdopen(fd, "wb") as output:
-            with urllib.request.urlopen(image["url"], timeout=30) as source:
-                check(source.geturl().startswith("https://"), "Image redirect requires HTTPS")
-                count = 0
-                while chunk := source.read(1024 * 1024):
-                    count += len(chunk)
-                    check(
-                        count <= image["size_bytes"] and time.monotonic() - started < 900,
-                        "Image download exceeded pinned size or time bound",
-                    )
-                    output.write(chunk)
+            previous_handler = signal.signal(signal.SIGALRM, deadline_expired)
+            try:
+                # A socket timeout alone can be extended indefinitely by a slow sender.
+                signal.setitimer(signal.ITIMER_REAL, DOWNLOAD_TIMEOUT)
+                with urllib.request.urlopen(image["url"], timeout=30) as source:
+                    check(source.geturl().startswith("https://"), "Image redirect requires HTTPS")
+                    count = 0
+                    while chunk := source.read(1024 * 1024):
+                        count += len(chunk)
+                        check(count <= image["size_bytes"], "Image download exceeded pinned size")
+                        output.write(chunk)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous_handler)
             output.flush()
             os.fsync(output.fileno())
         inspect_image(path, image)
