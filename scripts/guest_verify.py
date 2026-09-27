@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import platform
+import pty
 import re
 import select
 import shlex
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -83,61 +85,74 @@ def validate_kernel_transaction(summary):
 def confirm_kernel_transaction(argv, timeout=900):
     parser = ET.XMLPullParser(events=("end",))
     deadline, size, reviewed, confirmed = time.monotonic() + timeout, 0, False, False
-    with subprocess.Popen(
-        argv,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        bufsize=0,
-        env=dict(os.environ, LC_ALL="C"),
-    ) as process:
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                check(
-                    remaining > 0 and select.select([process.stdout], [], [], remaining)[0],
-                    "Kernel transaction timed out; inspect retained preparing guest",
-                )
-                chunk = os.read(process.stdout.fileno(), 4096)
-                if not chunk:
-                    break
-                size += len(chunk)
-                check(size <= 1048576, "Kernel transaction output exceeded bound")
-                parser.feed(chunk)
-                for _, element in parser.read_events():
+    master, slave = pty.openpty()
+    attributes = termios.tcgetattr(slave)
+    attributes[3] &= ~termios.ECHO
+    termios.tcsetattr(slave, termios.TCSANOW, attributes)
+
+    # Launch a fresh interpreter: Python preexec callbacks can deadlock after fork.
+    attach = (
+        "import fcntl,os,sys,termios;os.setsid();"
+        "fcntl.ioctl(int(sys.argv[1]),termios.TIOCSCTTY,0);"
+        "os.close(int(sys.argv[1]));os.execvp(sys.argv[2],sys.argv[2:])"
+    )
+
+    with os.fdopen(master, "wb", buffering=0) as terminal, os.fdopen(slave, "rb"):
+        with subprocess.Popen(
+            [sys.executable, "-c", attach, str(slave), *argv],
+            stdin=subprocess.DEVNULL,
+            pass_fds=(slave,),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+            env=dict(os.environ, LC_ALL="C"),
+        ) as process:
+            try:
+                while True:
+                    remaining = deadline - time.monotonic()
                     check(
-                        not (element.tag == "message" and element.get("type") == "error"),
-                        "Kernel transaction reported an error; inspect retained partial",
+                        remaining > 0 and select.select([process.stdout], [], [], remaining)[0],
+                        "Kernel transaction timed out; inspect retained preparing guest",
                     )
-                    if element.tag == "install-summary":
-                        check(not reviewed, "Repeated kernel transaction summary")
-                        validate_kernel_transaction(element)
-                        reviewed = True
-                    if element.tag == "prompt":
+                    chunk = os.read(process.stdout.fileno(), 4096)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    check(size <= 1048576, "Kernel transaction output exceeded bound")
+                    parser.feed(chunk)
+                    for _, element in parser.read_events():
                         check(
-                            reviewed and not confirmed and element.get("id") == "0",
-                            "Unexpected kernel transaction prompt; no further confirmation",
+                            not (element.tag == "message" and element.get("type") == "error"),
+                            "Kernel transaction reported an error; inspect retained partial",
                         )
-                        process.stdin.write(b"y\n")
-                        process.stdin.flush()
-                        confirmed = True
-            parser.close()
-            check(
-                confirmed and process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0,
-                "Kernel transaction failed; inspect retained preparing guest",
-            )
-        except (ET.ParseError, OSError, subprocess.SubprocessError):
-            raise GuestError(
-                "Kernel transaction failed; inspect retained preparing guest"
-            ) from None
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+                        if element.tag == "install-summary":
+                            check(not reviewed, "Repeated kernel transaction summary")
+                            validate_kernel_transaction(element)
+                            reviewed = True
+                        if element.tag == "prompt":
+                            check(
+                                reviewed and not confirmed and element.get("id") == "0",
+                                "Unexpected kernel transaction prompt; no further confirmation",
+                            )
+                            terminal.write(b"y\n")
+                            confirmed = True
+                parser.close()
+                check(
+                    confirmed and process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0,
+                    "Kernel transaction failed; inspect retained preparing guest",
+                )
+            except (ET.ParseError, OSError, subprocess.SubprocessError):
+                raise GuestError(
+                    "Kernel transaction failed; inspect retained preparing guest"
+                ) from None
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
 
 
 def download_kernel_packages(directory):

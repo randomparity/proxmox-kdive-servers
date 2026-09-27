@@ -148,6 +148,9 @@ metadata signature checking and native downloads into private temporary storage.
 Check both downloaded RPM identities and signatures. The actual native install
 process must present exactly two pinned installs and the pinned base removal;
 validate its XML solver summary before answering its one confirmation prompt.
+The guest provides a private controlling terminal because zypper reads replies
+from `/dev/tty`; XML output stays on a separate pipe, and no noninteractive
+default-answer mode is used.
 Reject extra/different packages, action types, trust prompts, repeated prompts,
 malformed or oversized output, errors and timeouts. Do not trust an earlier dry-run
 as authority for a later unchecked transaction. Verify the resulting package set,

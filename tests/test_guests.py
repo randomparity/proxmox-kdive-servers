@@ -493,8 +493,10 @@ class TestOpenSusePrerequisite(unittest.TestCase):
 
         body = self.summary() + '<prompt id="0"><text>Continue?</text></prompt>'
         script = (
-            "import sys;print('<stream>' + " + repr(body) + ",flush=True);"
-            "answer=sys.stdin.readline();print('</stream>',flush=True);"
+            "import sys,termios;tty=open('/dev/tty');"
+            "assert not termios.tcgetattr(tty)[3] & termios.ECHO;"
+            "print('<stream>' + " + repr(body) + ",flush=True);"
+            "answer=tty.readline();print('</stream>',flush=True);"
             "sys.exit(0 if answer == 'y\\n' else 9)"
         )
         try:
@@ -591,7 +593,7 @@ class TestOpenSusePrerequisite(unittest.TestCase):
                     "import pathlib,sys;print("
                     + repr("<stream>" + summary + '<prompt id="0"/>')
                     + ",flush=True);"
-                    "answer=sys.stdin.readline();assert answer == 'y\\n';"
+                    "answer=open('/dev/tty').readline();assert answer == 'y\\n';"
                     "pathlib.Path(" + repr(str(installed)) + ").write_text('yes');"
                     "print('</stream>',flush=True)"
                 )
@@ -599,7 +601,7 @@ class TestOpenSusePrerequisite(unittest.TestCase):
                     script = script.replace(".write_text('yes')", ".write_text('yes');sys.exit(9)")
                 if fault == "binary":
                     script += ";pathlib.Path(" + repr(str(kernel)) + ").write_bytes(b'changed')"
-                return popen([sys.executable, "-c", script], **kwargs)
+                return popen(argv[:4] + [sys.executable, "-c", script], **kwargs)
 
             def path(value):
                 if str(value).startswith("/boot/vmlinuz-"):
