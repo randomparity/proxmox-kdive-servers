@@ -404,7 +404,8 @@ def session(requests, mode):
             if not present:
                 clone(request)
             emit(request, "prepared", fresh=not present)
-            verify_ack(request, read_line(1800))
+            # Cover 600s SSH readiness, 1800s verification and transport margin.
+            verify_ack(request, read_line(2500))
             command(["qm", "agent", str(request["host"]["vmid"]), "ping"], timeout=60)
             if not present:
                 inspect_guest(request, phase="preparing")

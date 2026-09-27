@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import io
+import itertools
 import json
 import os
 import select
@@ -418,6 +419,32 @@ class TestNativeLifecycle(unittest.TestCase):
         with self.assertRaises(guest_host.GuestError):
             self.execute("apply")
         self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
+
+    def test_slow_successful_guest_can_acknowledge_within_controller_budget(self):
+        reader, writer = os.pipe()
+        ack = {"vmid": 1101, "identity": guest_host.identity(self.req), "verified": True}
+        os.write(writer, (json.dumps(ack) + "\n").encode())
+        os.close(writer)
+        read_line = guest_host.read_line
+        with os.fdopen(reader, "rb", buffering=0) as stream:
+
+            def delayed_ack(timeout):
+                with (
+                    patch.object(guest_host.sys, "stdin", stream),
+                    patch.object(
+                        guest_host.time,
+                        "monotonic",
+                        side_effect=itertools.chain([0], itertools.repeat(1900)),
+                    ),
+                ):
+                    return read_line(timeout)
+
+            with (
+                patch.object(guest_host, "read_line", side_effect=delayed_ack),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                guest_host.session([self.req], "apply")
+        self.assertTrue(self.fixture.guests[1101]["config"]["description"].endswith(":ready"))
 
     def test_clone_failure_does_not_continue_or_delete(self):
         self.fixture.fail_clone = True
