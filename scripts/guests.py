@@ -279,17 +279,22 @@ def validate_event(request, event, phase):
 
 
 def read_event(process):
-    require(
-        bool(select.select([process.stdout], [], [], 2400)[0]),
-        "Native guest",
-        "operation deadline expired; inspect partial allocation",
-    )
-    line = process.stdout.readline(65537)
-    require(
-        bool(line) and len(line) <= 65536 and line.endswith(b"\n"),
-        "Native guest",
-        "transport ended or output exceeded bound; inspect state",
-    )
+    deadline = time.monotonic() + 2400
+    line = bytearray()
+    while not line.endswith(b"\n"):
+        remaining = deadline - time.monotonic()
+        require(
+            remaining > 0 and select.select([process.stdout], [], [], remaining)[0],
+            "Native guest",
+            "operation deadline expired; inspect partial allocation",
+        )
+        part = os.read(process.stdout.fileno(), 1)
+        require(
+            part and len(line) < 65536,
+            "Native guest",
+            "transport ended or output exceeded bound; inspect state",
+        )
+        line.extend(part)
     try:
         event = json.loads(line)
     except ValueError:

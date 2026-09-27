@@ -4,11 +4,14 @@ import contextlib
 import copy
 import io
 import json
+import os
 import select
+import signal
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import guest_host, guest_verify, guests
@@ -460,6 +463,29 @@ class TestNativeLifecycle(unittest.TestCase):
 
 
 class TestController(unittest.TestCase):
+    def test_partial_event_cannot_block_past_read_deadline(self):
+        reader, writer = os.pipe()
+        stream = os.fdopen(reader, "rb", buffering=0)
+        real_select = select.select
+
+        def alarm(signum, frame):
+            raise TimeoutError("A partial event blocked after readiness")
+
+        previous = signal.signal(signal.SIGALRM, alarm)
+        try:
+            os.write(writer, b"{")
+            signal.alarm(2)
+            with patch.object(
+                guests.select, "select", side_effect=lambda r, w, x, _: real_select(r, w, x, 0.01)
+            ):
+                with self.assertRaises(ValidationError):
+                    guests.read_event(SimpleNamespace(stdout=stream))
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+            stream.close()
+            os.close(writer)
+
     def test_batch_plan_consumes_back_to_back_events(self):
         requests = [request(), request()]
         requests[1]["host"]["vmid"] += 1

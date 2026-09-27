@@ -3,6 +3,7 @@
 import contextlib
 import json
 import math
+import os
 import re
 import select
 import sys
@@ -364,15 +365,20 @@ def emit(request, phase, **values):
 
 
 def read_line(timeout):
-    check(
-        bool(select.select([sys.stdin], [], [], timeout)[0]),
-        "Controller acknowledgement timed out; inspect preparing guest",
-    )
-    line = sys.stdin.readline(65537)
-    check(
-        bool(line) and len(line) <= 65536 and line.endswith("\n"),
-        "Controller disconnected or response exceeded bound; inspect preparing guest",
-    )
+    deadline = time.monotonic() + timeout
+    line = bytearray()
+    while not line.endswith(b"\n"):
+        remaining = deadline - time.monotonic()
+        check(
+            remaining > 0 and select.select([sys.stdin], [], [], remaining)[0],
+            "Controller acknowledgement timed out; inspect preparing guest",
+        )
+        part = os.read(sys.stdin.fileno(), 1)
+        check(
+            part and len(line) < 65536,
+            "Controller disconnected or response exceeded bound; inspect preparing guest",
+        )
+        line.extend(part)
     return json.loads(line)
 
 
