@@ -388,7 +388,7 @@ def verify_disks(request, config):
         allowed = {
             "scsi0": {"size"},
             "ide2": {"media", "size"},
-            "efidisk0": {"efitype", "pre-enrolled-keys", "size"},
+            "efidisk0": {"efitype", "pre-enrolled-keys", "ms-cert", "size"},
         }[slot]
         check(set(options) <= allowed, "Template disk options differ")
         if slot == "ide2":
@@ -397,6 +397,11 @@ def verify_disks(request, config):
                 "Template cloud-init disk differs",
             )
         if slot == "efidisk0":
+            # Proxmox adds this informational marker after enrolling its firmware keys.
+            check(
+                options.get("ms-cert") in {None, "2011", "2023", "2023w", "2023k"},
+                "Unknown native EFI certificate marker",
+            )
             check(
                 options.get("efitype") == "4m" and options.get("pre-enrolled-keys") == "1",
                 "Template EFI security configuration differs",

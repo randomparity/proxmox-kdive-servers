@@ -95,7 +95,7 @@ class NativeFixture:
                 options = {
                     "scsi0": "size=4G",
                     "ide2": "media=cdrom",
-                    "efidisk0": "efitype=4m,pre-enrolled-keys=1,size=4M",
+                    "efidisk0": "efitype=4m,ms-cert=2023k,pre-enrolled-keys=1,size=4M",
                 }[slot]
                 self.config[slot] = f"{volid},{options}"
                 self.volumes.append(
@@ -193,6 +193,15 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(first["identity"], second["identity"])
         self.assertEqual(first["config_sha256"], second["config_sha256"])
         self.assertFalse(any(c[0] == "qm" for c in self.native.calls))
+
+    def test_native_efi_certificate_marker(self):
+        self.host.run(self.request)
+        self.assertIn("ms-cert=2023k", self.native.config["efidisk0"])
+        self.native.config["efidisk0"] = self.native.config["efidisk0"].replace(
+            "2023k", "unexpected"
+        )
+        with self.assertRaisesRegex(self.host.TemplateError, "certificate"):
+            self.host.run(self.request)
 
     def test_plan_never_writes_and_node_mismatch(self):
         self.request["apply"] = False
