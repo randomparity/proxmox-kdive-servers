@@ -156,6 +156,69 @@ class TestValidation(unittest.TestCase):
                 validate_inventory(self.data)
 
 
+class TestTemplateValidation(unittest.TestCase):
+    def setUp(self):
+        self.data = load_inventory(EXAMPLE)
+        for index, host in enumerate(self.data["_meta"]["hostvars"].values()):
+            host.update(
+                template_vmid=9000 + index,
+                cpu="host",
+                proxmox_ssh_host="pve.invalid",
+                proxmox_ssh_user="root",
+                proxmox_ssh_port=22,
+            )
+        self.host = self.data["_meta"]["hostvars"]["ubuntu_local"]
+
+    def test_guest_inputs_can_wait(self):
+        for host in self.data["_meta"]["hostvars"].values():
+            host.update(vmid=None, ansible_host=None, ipv4_cidr=None, gateway=None, dns_servers=[])
+        self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
+        with self.assertRaises(ValidationError):
+            validate_inventory(self.data)
+
+    def test_template_identity_collisions(self):
+        other = self.data["_meta"]["hostvars"]["rocky_local"]
+        other["template_vmid"] = self.host["template_vmid"]
+        with self.assertRaisesRegex(ValidationError, "template_vmid"):
+            validate_inventory(self.data, "fedora_remote", purpose="templates")
+        other["profile"] = self.host["profile"]
+        self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
+        for field, value in [("vlan", 33), ("storage", "different"), ("bridge", "vmbr1")]:
+            with self.subTest(field=field):
+                original = other.copy()
+                other[field] = value
+                with self.assertRaises(ValidationError):
+                    validate_inventory(self.data, purpose="templates")
+                other.clear()
+                other.update(original)
+        other["vmid"] = self.host["template_vmid"]
+        with self.assertRaises(ValidationError):
+            validate_inventory(self.data, purpose="templates")
+
+    def test_template_literal_inputs(self):
+        for field, values in {
+            "cpu": [None, "x86-64-v2", "{{ value }}"],
+            "template_vmid": [None, True, 99, 1000000000],
+            "vlan": [False, 0, 4095, "12"],
+            "proxmox_ssh_host": ["-option", "bad host", "$(command)"],
+            "proxmox_ssh_user": [None, "bad user", "-option"],
+            "proxmox_ssh_port": [True, 0, 65536],
+            "proxmox_ssh_private_key_file": ["x\nSECRET_SENTINEL", "{{ key }}", ""],
+            "proxmox_api_ca_file": ["{{ ca }}", "x\x00SECRET_SENTINEL", ""],
+            "api_user_env": [None, "{{ secret }}"],
+            "api_token_secret": ["SECRET_SENTINEL"],
+        }.items():
+            original = self.host.copy()
+            for value in values:
+                with self.subTest(field=field):
+                    with self.assertRaises(ValidationError) as caught:
+                        self.host[field] = value
+                        validate_inventory(self.data, purpose="templates")
+                    self.assertNotIn("SECRET_SENTINEL", str(caught.exception))
+            self.host.clear()
+            self.host.update(original)
+
+
 class TestCLI(unittest.TestCase):
     def run_cli(self, *args, env=None):
         clean_env = {k: v for k, v in os.environ.items() if k not in {"INVENTORY", "TARGETS"}}

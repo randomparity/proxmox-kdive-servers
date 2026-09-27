@@ -1,0 +1,118 @@
+{
+  "ubuntu": {
+    "release": "24.04",
+    "build": "20260911",
+    "url": "https://cloud-images.ubuntu.com/releases/noble/release-20260911/ubuntu-24.04-server-cloudimg-amd64.img",
+    "checksum_url": "https://cloud-images.ubuntu.com/releases/noble/release-20260911/SHA256SUMS",
+    "sha256": "612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354",
+    "size_bytes": 625256960,
+    "virtual_size_bytes": 3758096384,
+    "bios": "ovmf",
+    "baseline": {
+      "customization": "none",
+      "architecture": "x86_64",
+      "product": "Ubuntu 24.04.5 LTS",
+      "package_format": "deb",
+      "package_count": 664,
+      "packages_sha256": "8530632f70921dd9446eee6960f2a498a91fd0303a7dd6604b6f5fddd1ee0313",
+      "management_packages": {
+        "apparmor": "4.0.1really4.0.1-0ubuntu0.24.04.7",
+        "cloud-init": "26.1-0ubuntu1~24.04.1",
+        "openssh-server": "1:9.6p1-3ubuntu13.19",
+        "python3": "3.12.3-0ubuntu2.1",
+        "sudo": "1.9.15p5-3ubuntu5.24.04.2",
+        "qemu-guest-agent": null
+      },
+      "nocloud": true,
+      "efi_boot_file": "/EFI/BOOT/BOOTX64.EFI",
+      "inspection": "libguestfs 1.54.1; read-only source image; 2026-09-27"
+    }
+  },
+  "fedora": {
+    "release": "44",
+    "build": "1.7",
+    "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+    "checksum_url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-44-1.7-x86_64-CHECKSUM",
+    "sha256": "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f",
+    "size_bytes": 583729152,
+    "virtual_size_bytes": 5368709120,
+    "bios": "ovmf",
+    "baseline": {
+      "customization": "none",
+      "architecture": "x86_64",
+      "product": "Fedora Linux 44 (Cloud Edition)",
+      "package_format": "rpm",
+      "package_count": 427,
+      "packages_sha256": "f38d1210612ce1f764dc3d9b760bf204510335a49ed3ff958d47f5315358e250",
+      "management_packages": {
+        "cloud-init": "25.3-3.fc44",
+        "openssh-server": "10.2p1-7.fc44",
+        "python3": "3.14.3-2.fc44",
+        "qemu-guest-agent": "2:10.2.2-1.fc44",
+        "selinux-policy": "43.3-1.fc44",
+        "sudo": "1.9.17-7.p2.fc44"
+      },
+      "nocloud": true,
+      "efi_boot_file": "/EFI/BOOT/BOOTX64.EFI",
+      "inspection": "libguestfs 1.54.1; read-only source image; 2026-09-27"
+    }
+  },
+  "rocky": {
+    "release": "10.2",
+    "build": "20260525.0",
+    "url": "https://download.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base-10.2-20260525.0.x86_64.qcow2",
+    "checksum_url": "https://download.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base-10.2-20260525.0.x86_64.qcow2.CHECKSUM",
+    "sha256": "9fc9e9ff16888bb68ac39b0392e25c9c92684d50c85f1cce6ab549363bbc4b48",
+    "size_bytes": 544997376,
+    "virtual_size_bytes": 10737418240,
+    "bios": "ovmf",
+    "baseline": {
+      "customization": "none",
+      "architecture": "x86_64",
+      "product": "Rocky Linux 10.2 (Red Quartz)",
+      "package_format": "rpm",
+      "package_count": 443,
+      "packages_sha256": "fa465116a57878a04a9ea526074ae3b5eb96f0f2e40a64a94f5a8bfe94092b35",
+      "management_packages": {
+        "cloud-init": "24.4-7.el10.0.1",
+        "openssh-server": "9.9p1-23.el10_2.rocky.0.1",
+        "python3": "3.12.13-2.el10_2",
+        "qemu-guest-agent": "18:10.1.0-16.el10_2",
+        "selinux-policy": "42.1.18-4.el10",
+        "sudo": "1.9.17-4.p2.el10_2"
+      },
+      "nocloud": true,
+      "efi_boot_file": "/EFI/BOOT/BOOTX64.EFI",
+      "inspection": "libguestfs 1.54.1; read-only source image; 2026-09-27"
+    }
+  },
+  "opensuse": {
+    "release": "16.0",
+    "build": "18.67",
+    "url": "https://download.opensuse.org/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-Cloud-Build18.67.qcow2",
+    "checksum_url": "https://download.opensuse.org/distribution/leap/16.0/appliances/Leap-16.0-Minimal-VM.x86_64-Cloud-Build18.67.qcow2.sha256",
+    "sha256": "cb7b34dc75f8168d232a6d4fcdd585667bf76e5ce6f76340888cb8ffb16f389d",
+    "size_bytes": 338059264,
+    "virtual_size_bytes": 1523580928,
+    "bios": "ovmf",
+    "baseline": {
+      "customization": "none",
+      "architecture": "x86_64",
+      "product": "openSUSE Leap 16.0",
+      "package_format": "rpm",
+      "package_count": 378,
+      "packages_sha256": "eebcbfe0056aef9b8cb1166af089b6778212f0f1281f9c992e7235200ebcac1f",
+      "management_packages": {
+        "cloud-init": "25.1.3-160000.3.1",
+        "openssh-server": "10.0p2-160000.7.1",
+        "python3-base": "3.13.14-160000.1.1",
+        "qemu-guest-agent": "10.0.13-160000.1.1",
+        "selinux-policy": "20250627+git398.8dcc9d038-160000.1.1",
+        "sudo": "1.9.17p1-160000.3.1"
+      },
+      "nocloud": true,
+      "efi_boot_file": "/EFI/BOOT/bootx64.efi",
+      "inspection": "libguestfs 1.54.1; read-only source image; 2026-09-27"
+    }
+  }
+}

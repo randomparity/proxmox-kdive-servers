@@ -122,7 +122,7 @@ def validate_key(value):
     require(valid, "ssh_public_keys", "supply an Ed25519, RSA or NIST ECDSA public key")
 
 
-def validate_host(host):
+def validate_common(host):
     require(isinstance(host, dict), "hostvars", "supply host variables for each managed target")
     require(
         not PLAINTEXT_CREDENTIALS.intersection(host),
@@ -134,10 +134,7 @@ def validate_host(host):
         "profile",
         "choose ubuntu, fedora, rocky or opensuse",
     )
-    integer(host.get("vmid"), "vmid", 100, 999999999)
     integer(host.get("proxmox_api_port", 8006), "proxmox_api_port", 1, 65535)
-    for field in ("cores", "memory_mib", "disk_gib"):
-        integer(host.get(field), field)
     if "vlan" in host:
         integer(host["vlan"], "vlan", 1, 4094)
     text_field(
@@ -145,7 +142,7 @@ def validate_host(host):
         "proxmox_api_host",
         r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?",
     )
-    for field in ("proxmox_node", "storage", "bridge", "ansible_user"):
+    for field in ("proxmox_node", "storage", "bridge"):
         text_field(host.get(field), field, r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
     for field in CREDENTIAL_REFS:
         text_field(host.get(field), field, r"[A-Z_][A-Z0-9_]{0,127}")
@@ -154,6 +151,51 @@ def validate_host(host):
         "credentials",
         "use distinct user, token ID and token secret environment names",
     )
+
+
+def validate_template_host(host):
+    validate_common(host)
+    integer(host.get("template_vmid"), "template_vmid", 100, 999999999)
+    require(host.get("cpu") == "host", "cpu", "set host explicitly")
+    text_field(
+        host.get("proxmox_ssh_host"),
+        "proxmox_ssh_host",
+        r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?",
+    )
+    text_field(host.get("proxmox_ssh_user"), "proxmox_ssh_user", r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
+    integer(host.get("proxmox_ssh_port", 22), "proxmox_ssh_port", 1, 65535)
+    for field in ("proxmox_api_ca_file", "proxmox_ssh_private_key_file"):
+        if field in host:
+            text_field(host[field], field, r"[^\x00-\x1f\x7f{}]+")
+    if host.get("vmid") is not None:
+        integer(host["vmid"], "vmid", 100, 999999999)
+
+
+def template_inputs(host):
+    fields = (
+        "profile",
+        "template_vmid",
+        "proxmox_node",
+        "storage",
+        "bridge",
+        "cpu",
+        "vlan",
+        "proxmox_api_host",
+        "proxmox_ssh_host",
+        "proxmox_ssh_user",
+    )
+    result = {field: host.get(field) for field in fields}
+    result["proxmox_api_port"] = host.get("proxmox_api_port", 8006)
+    result["proxmox_ssh_port"] = host.get("proxmox_ssh_port", 22)
+    return result
+
+
+def validate_host(host):
+    validate_common(host)
+    integer(host.get("vmid"), "vmid", 100, 999999999)
+    for field in ("cores", "memory_mib", "disk_gib"):
+        integer(host.get(field), field)
+    text_field(host.get("ansible_user"), "ansible_user", r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
     address = ipv4(host.get("ansible_host"), "ansible_host")
     cidr = host.get("ipv4_cidr")
     require(isinstance(cidr, str) and "/" in cidr, "ipv4_cidr", "supply IPv4 address/prefix")
@@ -220,19 +262,32 @@ def managed_hosts(data):
     return {name: hostvars[name] for name in sorted(names)}
 
 
-def validate_inventory(data, targets=None):
+def validate_inventory(data, targets=None, purpose="guests"):
+    require(purpose in {"guests", "templates"}, "purpose", "choose guests or templates")
     hosts = managed_hosts(data)
-    ids, addresses = set(), set()
+    ids, addresses, templates = set(), set(), {}
     for host in hosts.values():
-        validate_host(host)
-        require(host["vmid"] not in ids, "vmid", "IDs must be unique across managed targets")
-        require(
-            host["ansible_host"] not in addresses,
-            "ansible_host",
-            "addresses must be unique across managed targets",
-        )
-        ids.add(host["vmid"])
-        addresses.add(host["ansible_host"])
+        (validate_host if purpose == "guests" else validate_template_host)(host)
+        if host.get("vmid") is not None:
+            require(host["vmid"] not in ids, "vmid", "IDs must be unique across managed targets")
+            ids.add(host["vmid"])
+        if purpose == "guests":
+            require(
+                host["ansible_host"] not in addresses,
+                "ansible_host",
+                "addresses must be unique across managed targets",
+            )
+            addresses.add(host["ansible_host"])
+        else:
+            vmid = host["template_vmid"]
+            inputs = template_inputs(host)
+            require(
+                vmid not in templates or templates[vmid] == inputs,
+                "template_vmid",
+                "shared template IDs must have identical template inputs",
+            )
+            templates[vmid] = inputs
+    require(not ids.intersection(templates), "template_vmid", "must not collide with guest IDs")
     if targets is None:
         return len(hosts)
     require(isinstance(targets, str), "targets", "supply comma-separated exact inventory aliases")
@@ -298,9 +353,10 @@ def main():
         "--inventory", default=os.environ.get("INVENTORY", ROOT / "inventory/example.yml")
     )
     parser.add_argument("--targets", default=os.environ.get("TARGETS"))
+    parser.add_argument("--purpose", choices=["guests", "templates"], default="guests")
     args = parser.parse_args()
     try:
-        count = validate_inventory(load_inventory(args.inventory), args.targets)
+        count = validate_inventory(load_inventory(args.inventory), args.targets, args.purpose)
     except ValidationError as error:
         print(f"Validation failed: {error}", file=sys.stderr)
         return 1
