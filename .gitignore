@@ -1,0 +1,15 @@
+/.venv/
+/.agent/
+/.cache/
+**/__pycache__/
+.ruff_cache/
+*.pyc
+.env*
+/inventory/*
+!/inventory/example.yml
+/reports/
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*vault*password*

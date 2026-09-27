@@ -1,0 +1,7 @@
+---
+offline: true
+exclude_paths:
+  - .agent/
+  - .venv/
+  - .cache/
+  - inventory/private/
