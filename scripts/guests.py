@@ -131,7 +131,8 @@ def guest_ssh(host, known_hosts, fresh):
     return argv + ["--", host["ansible_host"]]
 
 
-def verify_guest(request, known_hosts, fresh):
+def verify_guest(request, known_hosts, fresh, guest_uuid):
+    request = dict(request, guest_uuid=guest_verify.machine_uuid(guest_uuid))
     prepare_known_hosts(known_hosts, fresh)
     argv = guest_ssh(request["host"], known_hosts, fresh)
     deadline = time.monotonic() + (600 if fresh else 30)
@@ -259,7 +260,7 @@ def host_ssh(host):
 def validate_event(request, event, phase):
     keys = {"vmid", "identity", "phase"} | {
         "planned": {"action"},
-        "prepared": {"fresh"},
+        "prepared": {"fresh", "guest_uuid"},
         "ready": {"action", "config_sha256", "duration_seconds"},
     }[phase]
     require(
@@ -274,6 +275,7 @@ def validate_event(request, event, phase):
     )
     if phase == "prepared":
         require(type(event["fresh"]) is bool, "Native guest", "invalid preparation phase")
+        guest_verify.machine_uuid(event["guest_uuid"])
     else:
         allowed = {"preserved", "would-create"} if phase == "planned" else {"preserved", "created"}
         require(event["action"] in allowed, "Native guest", "invalid action result")
@@ -344,7 +346,9 @@ def dispatch(requests, mode, known_hosts):
                             "Native guest",
                             "unexpected mutation",
                         )
-                        observations = verify_guest(request, known_hosts, event["fresh"])
+                        observations = verify_guest(
+                            request, known_hosts, event["fresh"], event["guest_uuid"]
+                        )
                         ack = {
                             "vmid": event["vmid"],
                             "identity": event["identity"],

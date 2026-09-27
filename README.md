@@ -257,6 +257,10 @@ actual OS/release/x86_64, hostname/FQDN/static IPv4, CPU/RAM/root filesystem, ac
 guest agent plus native ping, and enforcing SELinux or AppArmor. It opens the KVM
 API as root, requires version 12 and creates/closes a transient VM descriptor.
 This proves capability; KDIVE owns later virtualization permissions and workloads.
+Before any guest preparation, read-only checks match the guest DMI UUID to the
+owned VM's native SMBIOS UUID and verify its OS and network identity. A stale IP
+cannot authorize preparation merely by accepting the configured SSH credential.
+The UUID travels privately and is excluded from public evidence.
 
 Matching ready reruns perform verification only: they do not restart a stopped
 guest, update packages/keys, resize disks or clear test state. Drift, extra disks,

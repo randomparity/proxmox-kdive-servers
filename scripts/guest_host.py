@@ -403,7 +403,11 @@ def session(requests, mode):
                 continue
             if not present:
                 clone(request)
-            emit(request, "prepared", fresh=not present)
+            config = inspect_guest(request, phase="ready" if present else "preparing")
+            guest_uuid = guest_verify.machine_uuid(
+                template_host.properties(config.get("smbios1")).get("uuid")
+            )
+            emit(request, "prepared", fresh=not present, guest_uuid=guest_uuid)
             # Cover 600s SSH readiness, 1800s verification and transport margin.
             verify_ack(request, read_line(2500))
             command(["qm", "agent", str(request["host"]["vmid"]), "ping"], timeout=60)

@@ -121,6 +121,90 @@ class TestGuestHost(unittest.TestCase):
 
 
 class TestGuestVerifier(unittest.TestCase):
+    def test_wrong_peer_identity_is_rejected_before_preparation(self):
+        req = request()
+        req["guest_uuid"] = "12345678-1234-1234-1234-123456789abc"
+        for wrong in ("fqdn", "release", "uuid", "missing_uuid", "malformed_uuid"):
+            with self.subTest(wrong=wrong), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                files = {
+                    "/etc/os-release": 'ID=ubuntu\nVERSION_ID="24.04"\n',
+                    "/proc/cpuinfo": "flags : vmx",
+                    "/proc/meminfo": "MemTotal: 4194304 kB\n",
+                    "/sys/module/apparmor/parameters/enabled": "Y",
+                    "/sys/class/dmi/id/product_uuid": req["guest_uuid"].upper() + "\n",
+                }
+                if wrong == "release":
+                    files["/etc/os-release"] = 'ID=ubuntu\nVERSION_ID="22.04"\n'
+                if wrong in {"uuid", "malformed_uuid"}:
+                    files["/sys/class/dmi/id/product_uuid"] = (
+                        "87654321-1234-1234-1234-123456789abc" if wrong == "uuid" else "bad"
+                    )
+                if wrong == "missing_uuid":
+                    del files["/sys/class/dmi/id/product_uuid"]
+                for path, value in files.items():
+                    target = root / path.lstrip("/")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(value)
+                module = root / "etc/modules-load.d/kdive-kvm.conf"
+                module.parent.mkdir(parents=True)
+                calls = []
+
+                def command(argv, calls=calls, **kwargs):
+                    calls.append(argv)
+                    if argv[0] == "cloud-init":
+                        output = '{"status":"done"}'
+                    elif argv[0] == "ip":
+                        output = json.dumps(
+                            [
+                                {
+                                    "addr_info": [
+                                        {"family": "inet", "local": req["host"]["ansible_host"]}
+                                    ]
+                                }
+                            ]
+                        )
+                    elif argv[0] == "aa-status":
+                        output = '{"profiles":{"example":"enforce"}}'
+                    else:
+                        output = "1"
+                    return subprocess.CompletedProcess(argv, 0, output, "")
+
+                with (
+                    patch.object(
+                        guest_verify, "Path", side_effect=lambda p, root=root: root / p.lstrip("/")
+                    ),
+                    patch.object(guest_verify.os, "geteuid", return_value=0),
+                    patch.object(guest_verify.os, "cpu_count", return_value=2),
+                    patch.object(
+                        guest_verify.os,
+                        "statvfs",
+                        return_value=SimpleNamespace(
+                            f_blocks=31 * 1024**3,
+                            f_frsize=1,
+                        ),
+                    ),
+                    patch.object(guest_verify.platform, "system", return_value="Linux"),
+                    patch.object(guest_verify.platform, "machine", return_value="x86_64"),
+                    patch.object(guest_verify.socket, "gethostname", return_value="ubuntu-local"),
+                    patch.object(
+                        guest_verify.socket,
+                        "getfqdn",
+                        return_value=(
+                            "other.example.invalid" if wrong == "fqdn" else req["host"]["fqdn"]
+                        ),
+                    ),
+                    patch.object(guest_verify.shutil, "which", return_value="/tool"),
+                    patch.object(guest_verify.subprocess, "run", side_effect=command),
+                    patch.object(guest_verify.os, "open", return_value=10),
+                    patch.object(guest_verify.os, "close"),
+                    patch.object(guest_verify.fcntl, "ioctl", side_effect=[12, 11]),
+                ):
+                    with self.assertRaises(guest_verify.GuestError):
+                        guest_verify.run(req, fresh=True)
+                self.assertFalse(any(c[0] in {"apt-get", "systemctl", "modprobe"} for c in calls))
+                self.assertFalse(module.exists())
+
     def test_preparation_installs_only_missing_agent_and_persists_existing_module(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -187,7 +271,9 @@ class TestGuestVerifier(unittest.TestCase):
 
     def test_observation_rejects_bad_os_name_size_and_security(self):
         req = request()
+        req["guest_uuid"] = "12345678-1234-1234-1234-123456789abc"
         observed = {
+            "guest_uuid": req["guest_uuid"].upper(),
             "os_id": "ubuntu",
             "release": "24.04",
             "architecture": "x86_64",
@@ -203,6 +289,7 @@ class TestGuestVerifier(unittest.TestCase):
         }
         guest_verify.validate_observation(req, observed)
         cases = {
+            "guest_uuid": "87654321-1234-1234-1234-123456789abc",
             "os_id": "debian",
             "release": "22.04",
             "architecture": "aarch64",
@@ -261,6 +348,7 @@ class GuestNativeFixture:
             config = copy.deepcopy(self.template.config)
             config.pop("template")
             config.update(name=opts["--name"], description=opts["--description"])
+            config["smbios1"] = f"uuid=00000000-0000-4000-8000-{vmid:012d}"
             for slot in ("scsi0", "ide2", "efidisk0"):
                 config[slot] = (
                     config[slot].replace("base-9001", f"vm-{vmid}").replace("vm-9001", f"vm-{vmid}")
@@ -646,9 +734,13 @@ class TestController(unittest.TestCase):
             "identity": guest_host.identity(req),
             "phase": "prepared",
             "fresh": True,
+            "guest_uuid": "12345678-1234-1234-1234-123456789abc",
         }
         guests.validate_event(req, result, "prepared")
         with self.assertRaises(ValidationError):
             guests.validate_event(req, dict(result, identity="b" * 64), "prepared")
         with self.assertRaises(ValidationError):
             guests.validate_event(req, dict(result, fqdn="secret.example.invalid"), "prepared")
+        for value in (None, "bad", "00000000-0000-0000-0000-000000000000"):
+            with self.assertRaises(ValueError):
+                guests.validate_event(req, dict(result, guest_uuid=value), "prepared")

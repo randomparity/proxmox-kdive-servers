@@ -95,6 +95,12 @@ uses strict checking; existing stored keys are never removed or replaced. Pinnin
 does not authenticate the first network peer against a malicious lab network.
 Host SSH continues its existing strict key policy. Do not copy private keys to
 the host or guest. Use bounded connection/boot/command deadlines.
+The private prepared event carries the owned native VM's SMBIOS UUID. Before
+preparation, the guest must match that UUID from read-only DMI data, together with
+the expected OS/release/architecture, hostname/FQDN and static IPv4. Normalize UUID
+case through the standard UUID parser; missing, malformed or mismatched identity
+fails before package, service, module or file changes. Exclude the UUID from public
+summaries. This admission binds a reachable SSH peer to the selected owned clone.
 
 Await authenticated SSH and successful cloud-init before preparation. Install
 only missing SSH/sudo/Python/cloud-init/guest-agent prerequisites with native

@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -128,17 +129,29 @@ def package_versions(profile):
     return versions
 
 
-def observation(request):
-    host = request["host"]
+def machine_uuid(value):
+    check(isinstance(value, str), "Guest UUID missing; inspect owned VM identity")
+    try:
+        parsed = uuid.UUID(value.strip())
+    except ValueError:
+        raise GuestError("Guest UUID malformed; inspect owned VM identity") from None
+    check(parsed.int != 0, "Guest UUID is empty; inspect owned VM identity")
+    return str(parsed)
+
+
+def identity_observation():
     release = {}
     for line in Path("/etc/os-release").read_text().splitlines():
         key, separator, value = line.partition("=")
         if separator and key in {"ID", "VERSION_ID"}:
             release[key] = shlex.split(value)[0]
-    memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
-    filesystem = os.statvfs("/")
     interfaces = json.loads(command(["ip", "-j", "-4", "address", "show", "scope", "global"]))
+    try:
+        guest_uuid = machine_uuid(Path("/sys/class/dmi/id/product_uuid").read_text())
+    except OSError:
+        raise GuestError("Guest UUID unavailable; inspect owned VM identity") from None
     return {
+        "guest_uuid": guest_uuid,
         "os_id": release.get("ID"),
         "release": release.get("VERSION_ID"),
         "architecture": platform.machine(),
@@ -150,17 +163,28 @@ def observation(request):
             for address in interface.get("addr_info", [])
             if address.get("family") == "inet"
         ],
+    }
+
+
+def observation(request):
+    memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
+    filesystem = os.statvfs("/")
+    return identity_observation() | {
         "cpus": os.cpu_count(),
         "memory_bytes": int(memory["MemTotal"].split()[0]) * 1024,
         "filesystem_bytes": filesystem.f_blocks * filesystem.f_frsize,
-        "security": security_state(host["profile"]),
+        "security": security_state(request["host"]["profile"]),
         "kvm_api": kvm_probe(),
         "kvm_create_vm": True,
     }
 
 
-def validate_observation(request, result):
+def validate_identity(request, result):
     host = request["host"]
+    check(
+        machine_uuid(result.get("guest_uuid")) == machine_uuid(request.get("guest_uuid")),
+        "Guest UUID differs from owned native VM; inspect SSH destination before preparation",
+    )
     expected_os = {
         "ubuntu": "ubuntu",
         "fedora": "fedora",
@@ -178,6 +202,11 @@ def validate_observation(request, result):
         "Guest hostname/FQDN differs; inspect cloud-init",
     )
     check(host["ansible_host"] in result.get("ipv4", []), "Guest static IPv4 differs")
+
+
+def validate_observation(request, result):
+    validate_identity(request, result)
+    host = request["host"]
     check(
         type(result.get("cpus")) is int and result["cpus"] == host["cores"],
         "Guest CPU count differs",
@@ -210,6 +239,7 @@ def run(request, fresh=False):
         and not cloud.get("recoverable_errors"),
         "Cloud-init did not complete cleanly",
     )
+    validate_identity(request, identity_observation())
     if fresh:
         prepare(request["host"]["profile"])
     command(["systemctl", "is-active", "qemu-guest-agent"])
