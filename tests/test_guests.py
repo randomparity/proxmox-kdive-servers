@@ -472,12 +472,13 @@ class TestGuestVerifier(unittest.TestCase):
 
 class TestOpenSusePrerequisite(unittest.TestCase):
     def summary(self):
+        # Sanitized action/identity fields captured from native local-RPM dry-run XML.
         return (
             '<install-summary packages-to-change="3" need-reboot="1">'
             '<to-install><solvable type="package" name="kernel-default" '
-            'edition="6.12.0-160000.38.1" arch="x86_64" repository="@commandline"/>'
+            'edition="6.12.0-160000.38.1" arch="x86_64" repository="_tmpRPMcache_"/>'
             '<solvable type="package" name="ucode-intel" '
-            'edition="20260812-160000.1.1" arch="x86_64" repository="@commandline"/>'
+            'edition="20260812-160000.1.1" arch="x86_64" repository="_tmpRPMcache_"/>'
             '</to-install><to-remove><solvable type="package" name="kernel-default-base" '
             'edition="6.12.0-160000.38.1.160000.2.24" arch="x86_64" repository="@System"/>'
             "</to-remove></install-summary>"
@@ -493,7 +494,10 @@ class TestOpenSusePrerequisite(unittest.TestCase):
             "answer=sys.stdin.readline();print('</stream>',flush=True);"
             "sys.exit(0 if answer == 'y\\n' else 9)"
         )
-        guest_verify.confirm_kernel_transaction([sys.executable, "-c", script], timeout=5)
+        try:
+            guest_verify.confirm_kernel_transaction([sys.executable, "-c", script], timeout=5)
+        except guest_verify.GuestError as error:
+            self.fail(str(error))
 
     def test_transaction_rejects_changed_actions_and_prompts(self):
         self.assertTrue(callable(getattr(guest_verify, "confirm_kernel_transaction", None)))
@@ -507,7 +511,7 @@ class TestOpenSusePrerequisite(unittest.TestCase):
             summary.replace('packages-to-change="3"', 'packages-to-change="4"') + prompt,
             summary.replace("<to-install>", '<to-install><solvable name="extra"/>') + prompt,
             summary.replace("</install-summary>", "<to-upgrade/></install-summary>") + prompt,
-            summary.replace('repository="@commandline"', 'repository="untrusted"') + prompt,
+            summary.replace('repository="_tmpRPMcache_"', 'repository="untrusted"') + prompt,
             prompt + summary,
             summary + prompt.replace('id="0"', 'id="1"'),
             summary + prompt + prompt,

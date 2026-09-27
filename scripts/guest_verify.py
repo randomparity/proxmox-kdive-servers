@@ -55,7 +55,7 @@ def validate_kernel_transaction(summary):
         "Kernel transaction actions differ; inspect vendor repository state",
     )
     for action, expected, repository in (
-        ("to-install", OPENSUSE_PACKAGES, "@commandline"),
+        ("to-install", OPENSUSE_PACKAGES, "_tmpRPMcache_"),
         ("to-remove", {"kernel-default-base": OPENSUSE_BASE}, "@System"),
     ):
         packages = list(summary.find(action))
