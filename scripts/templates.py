@@ -6,12 +6,15 @@ import math
 import os
 import re
 import shlex
+import signal
 import ssl
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+API_TIMEOUT = 60
 
 if __package__:
     from . import template_host
@@ -43,6 +46,9 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def api_admission(host):
+    def deadline_expired(signum, frame):
+        raise ValidationError("API admission exceeded its total deadline")
+
     values = [os.environ.get(host[field], "") for field in CREDENTIAL_REFS]
     require(
         all(value and not any(ord(c) < 32 or ord(c) == 127 for c in value) for value in values),
@@ -50,7 +56,10 @@ def api_admission(host):
         "set the referenced API credential environment variables",
     )
     user, token, secret = values
+    previous_handler = signal.signal(signal.SIGALRM, deadline_expired)
     try:
+        # Bound the complete admission even when a response keeps making slow progress.
+        signal.setitimer(signal.ITIMER_REAL, API_TIMEOUT)
         context = ssl.create_default_context(cafile=host.get("proxmox_api_ca_file") or None)
         opener = urllib.request.build_opener(
             NoRedirect, urllib.request.HTTPSHandler(context=context)
@@ -78,6 +87,9 @@ def api_admission(host):
         raise ValidationError(
             "API admission failed; check CA, endpoint and token audit permissions"
         ) from None
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
     node, storage = responses
     cpu = node.get("cpuinfo", {})
     memory = node.get("memory", {})

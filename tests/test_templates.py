@@ -501,6 +501,38 @@ class TestController(unittest.TestCase):
             proxmox_ssh_host="pve.invalid", proxmox_ssh_user="root", cpu="host", template_vmid=9000
         )
 
+    def test_api_deadline_interrupts_blocking_response(self):
+        import io
+        import os
+        import signal
+        import time
+        from unittest.mock import patch
+
+        from scripts.validate_inventory import ValidationError
+
+        class SlowResponse(io.BytesIO):
+            def read(self, size):
+                time.sleep(0.2)
+                return super().read(size)
+
+        source = SlowResponse(b'{"data":{"cpuinfo":{"cpus":8},"memory":{"total":1024}}}')
+        storage = io.BytesIO(
+            b'{"data":{"active":1,"enabled":1,"type":"zfspool","content":"images"}}'
+        )
+        self.addCleanup(storage.close)
+        handler = signal.getsignal(signal.SIGALRM)
+        env = {self.host[key]: "credential" for key in self.controller.CREDENTIAL_REFS}
+        with (
+            patch.dict(os.environ, env),
+            patch.object(self.controller, "API_TIMEOUT", 0.03, create=True),
+            patch("urllib.request.OpenerDirector.open", side_effect=[source, storage]),
+            self.assertRaises(ValidationError),
+        ):
+            self.controller.api_admission(self.host)
+        self.assertTrue(source.closed)
+        self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
+
     def test_api_ssh_failures_are_fatal(self):
         import os
         import subprocess
