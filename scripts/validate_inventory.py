@@ -165,7 +165,7 @@ def validate_template_host(host):
     text_field(host.get("proxmox_ssh_user"), "proxmox_ssh_user", r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
     integer(host.get("proxmox_ssh_port", 22), "proxmox_ssh_port", 1, 65535)
     for field in ("proxmox_api_ca_file", "proxmox_ssh_private_key_file"):
-        if field in host:
+        if host.get(field) not in (None, ""):
             text_field(host[field], field, r"[^\x00-\x1f\x7f{}]+")
     if host.get("vmid") is not None:
         integer(host["vmid"], "vmid", 100, 999999999)

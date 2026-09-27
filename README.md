@@ -2,8 +2,8 @@
 
 This repository prepares clean Linux VMs for
 [KDIVE validation](https://github.com/randomparity/kdive/issues/2803).
-Currently it provides the controller environment and **offline inventory checks**.
-It does not yet create VMs, import images, restore snapshots, or install KDIVE.
+It provides offline inventory checks and verified, unbooted Proxmox templates for
+four Linux families. Guest provisioning, snapshots and KDIVE installation follow separately.
 
 ## Controller setup
 
@@ -36,7 +36,8 @@ run the shared checks. The lock includes transitive dependencies and hashes.
 
 The tracked [example](inventory/example.yml) is ordinary static Ansible YAML,
 with anonymous documentation addresses and a public key that grants no access.
-It demonstrates four independently selectable families, not verified releases:
+It demonstrates four independently selectable profiles; exact image pins and inspected
+baselines are recorded in [vars/images.json](vars/images.json):
 
 | Alias | Family | Architecture |
 | --- | --- | --- |
@@ -78,7 +79,11 @@ Other groups may coexist, but these checks only validate managed `kdive` hosts.
 | `gateway`, `dns_servers` | Different usable gateway in the subnet; non-empty IPv4 DNS list |
 | `ansible_user`, `ssh_public_keys` | Guest account and non-empty OpenSSH public-key list (Ed25519/RSA/NIST ECDSA) |
 | `cores`, `memory_mib`, `disk_gib` | Positive integer sizing, at most 2147483647; no Boolean/string coercion |
-| `vlan` | Optional integer 1–4094 |
+| `vlan` | Optional integer 1–4094; propagated to the template NIC |
+| `template_vmid`, `cpu` | Explicit template ID 100–999999999 and literal `host` CPU |
+| `proxmox_ssh_host`, `proxmox_ssh_user`, `proxmox_ssh_port` | Native host SSH endpoint, root-capable login, port default 22 |
+| `proxmox_ssh_private_key_file` | Optional private-key path; blank/omitted uses normal SSH identities |
+| `proxmox_api_ca_file` | Optional CA bundle path; blank/omitted uses system trust |
 
 IDs and guest IPv4 addresses must be globally unique within `kdive`, even when a
 subset is selected. The complete managed inventory is checked before selection.
@@ -109,22 +114,91 @@ Keep the fixed `-i localhost,` bootstrap: passing private inventory to Ansible's
 private source. It captures parser diagnostics and reports field/rule errors without
 input values. The playbook hides task output; run `make validate` for safe details.
 
-## Before live operations
+## Verified templates
 
-The operator supplies a private record of Proxmox version/node, API permissions,
-bridge/VLAN/storage, snapshot support, measured free CPU/RAM/disk, intended concurrency,
-SSH access, and exclusive VM assignments. Offline success verifies none of these.
-[Issue #4](https://github.com/randomparity/proxmox-kdive-servers/issues/4) must verify
-these prerequisites before mutation; unavailable capacity/access is a failed prerequisite.
+Run on an existing x86_64 Linux Proxmox host with root SSH, Python 3.11+, `qm`,
+`pvesh` and `qemu-img`. This path was developed against Proxmox 9.2; it installs
+nothing on the host. The API token needs positive node/storage audit visibility
+(for example, inherited `PVEAuditor`). Configure a trusted API CA and SSH known-host
+entry first. TLS verification and strict SSH host-key checking remain enabled.
 
-[Issue #3](https://github.com/randomparity/proxmox-kdive-servers/issues/3) owns exact
-releases/images/checksums, template identity and storage admission. Issue #4 owns
-cloning, sizing, authenticated readiness and actual nested KVM.
+Only active `zfspool` and `lvmthin` image storage is admitted: imported root and EFI
+disks must support native snapshots before template conversion, and native cloning
+after conversion. Base template volumes themselves are not snapshot targets. Require
+space for each image's virtual size plus 16 MiB for auxiliary disks, as well as about
+2.1 GB under `/var/cache/kdive-templates` for all four compressed sources. A tagged NIC
+requires a VLAN-aware bridge or the native conventional-bridge VLAN uplink support.
+The operator owns bridge/uplink configuration and external DHCP/DNS administration.
+
+Assign explicit unused template IDs and CPU `host`. Template validation permits
+unassigned guest `vmid`, `ansible_host`, `ipv4_cidr`, `gateway` and `dns_servers`;
+operator-assigned static IPv4 addresses and resolver IPs are required before guest
+provisioning. Guest validation remains strict. A shared template ID requires identical
+profile/node/storage/bridge/VLAN/CPU and endpoint inputs throughout the inventory.
+Provided guest IDs must be unique and cannot overlap any template ID.
+
+```sh
+.venv/bin/python scripts/validate_inventory.py --purpose templates \
+  --inventory inventory/private/lab.yml
+# Export the three variables named by api_*_env in private inventory.
+# If using a trusted local .env file:
+set -a
+. ./.env
+set +a
+make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+# Review the plan, then explicitly import the selected template:
+make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local APPLY=1
+```
+
+`TARGETS` is mandatory and accepts exact comma-separated aliases. The default is a
+read-only live plan: API authentication, authoritative native VMID/storage/network
+checks and existing-template inspection, without cache/lock or VM writes. Apply
+holds a nonblocking native per-template lock through download, creation and final
+verification. Another cooperating run fails busy. Do not concurrently edit or migrate
+these resources through another controller or operator session.
+
+The same controller operation is exposed through Ansible:
+
+```sh
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+  .venv/bin/ansible-playbook -i localhost, playbooks/templates.yml
+```
+
+Add `APPLY=1` for import. Keep `-i localhost,`; private source parsing stays inside
+the protected task. The role uses `no_log`; Make prints safe outcome/identity JSON.
+No API credentials travel over SSH. Failures preserve private input values, report
+nonzero status and, when observable, the residual ownership phase.
+
+All profiles use OVMF with enrolled secure-boot keys, `host` CPU, two cores, 2048 MiB,
+virtio SCSI, serial console and NoCloud media. VLAN tags come directly from inventory.
+Images remain unmodified and unbooted. Their full vendor checksum, exact byte length,
+QCOW2 format, virtual size and absence of backing/encryption/external data are checked
+before import. Matching ready reruns verify description identity, hardware, stopped
+state, exact owned disks and native capabilities without changing Proxmox resources.
+Image, baseline or template configuration changes require a new explicit VMID;
+there is no automatic replacement or deletion command.
+
+An interrupted creation is refused on an ordinary rerun. After inspecting private
+host task/configuration state, `APPLY=1 RESUME=1` may finish only a complete, stopped,
+owned import with exact configuration/disks and no pending changes or task lock.
+Missing or ambiguous allocations require operator inspection. The wrapper never
+removes VMs or volumes; native `qm create` may roll back its own fresh allocations.
+API/SSH/native failures never establish resource absence.
+
+The source image digest identifies the unchanged package baseline. Inspection used
+read-only libguestfs 1.54.1 to verify OS/architecture, EFI fallback boot files, cloud-init
+NoCloud modules/effective configuration and package tuples. `packages_sha256` hashes
+compact, sorted-key UTF-8 JSON of package objects with `name`, `epoch`, `version`,
+`release`, `arch`, sorted by that tuple. Missing tuple values are empty strings.
+Management package versions and absences are recorded separately. In particular,
+the Ubuntu source lacks `qemu-guest-agent`; downstream preparation owns installing it.
+No security enforcement or package state is changed to manufacture import success.
+
+Import/rerun proof establishes template identity and storage eligibility. It does not
+establish guest boot, usable networking, cloud-init execution or nested KVM.
+[Issue #4](https://github.com/randomparity/proxmox-kdive-servers/issues/4) owns cloning,
+sizing, capacity, management prerequisites and authenticated guest readiness.
 [Issue #5](https://github.com/randomparity/proxmox-kdive-servers/issues/5) owns clean
-snapshots, restore, serialization and scoped teardown. These extend this inventory
-and validation entry point instead of adding a second configuration system.
-
-KDIVE owns installation, libvirt/build/debug tools, runners, guest qualification,
-and test results/external state. Provisioning stops at documented management
-prerequisites (SSH, sudo, Python, cloud-init and guest agent), preserving security
-enforcement. A clean VM or snapshot does not prove KDIVE support for a distro.
+snapshots, restore, test-use coordination and scoped teardown, consuming this identity.
+KDIVE owns installation, libvirt/build/debug tools, runners, workload qualification
+and external test state. The operator owns host module/reboot and network changes.

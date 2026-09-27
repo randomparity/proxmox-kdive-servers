@@ -76,7 +76,15 @@ class TestValidation(unittest.TestCase):
 
     def test_required_fields_and_plaintext_credentials(self):
         for field in list(self.host):
-            if field in {"proxmox_api_port", "vlan"}:
+            if field in {
+                "proxmox_api_port",
+                "vlan",
+                "cpu",
+                "template_vmid",
+                "proxmox_ssh_host",
+                "proxmox_ssh_user",
+                "proxmox_ssh_port",
+            }:
                 continue
             with self.subTest(missing=field):
                 value = self.host.pop(field)
@@ -171,7 +179,14 @@ class TestTemplateValidation(unittest.TestCase):
 
     def test_guest_inputs_can_wait(self):
         for host in self.data["_meta"]["hostvars"].values():
-            host.update(vmid=None, ansible_host=None, ipv4_cidr=None, gateway=None, dns_servers=[])
+            host.update(
+                vmid=None,
+                ansible_host=None,
+                ipv4_cidr=None,
+                gateway=None,
+                dns_servers=[],
+                proxmox_ssh_private_key_file=None,
+            )
         self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
         with self.assertRaises(ValidationError):
             validate_inventory(self.data)
@@ -203,8 +218,8 @@ class TestTemplateValidation(unittest.TestCase):
             "proxmox_ssh_host": ["-option", "bad host", "$(command)"],
             "proxmox_ssh_user": [None, "bad user", "-option"],
             "proxmox_ssh_port": [True, 0, 65536],
-            "proxmox_ssh_private_key_file": ["x\nSECRET_SENTINEL", "{{ key }}", ""],
-            "proxmox_api_ca_file": ["{{ ca }}", "x\x00SECRET_SENTINEL", ""],
+            "proxmox_ssh_private_key_file": ["x\nSECRET_SENTINEL", "{{ key }}", 1],
+            "proxmox_api_ca_file": ["{{ ca }}", "x\x00SECRET_SENTINEL", 1],
             "api_user_env": [None, "{{ secret }}"],
             "api_token_secret": ["SECRET_SENTINEL"],
         }.items():

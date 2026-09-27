@@ -1,0 +1,7 @@
+---
+- name: Manage verified templates from the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - role: proxmox_template
