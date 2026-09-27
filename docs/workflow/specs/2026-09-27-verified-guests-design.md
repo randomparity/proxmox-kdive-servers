@@ -26,6 +26,14 @@ the static IPv4 endpoint. Guest provisioning also requires valid existing templa
 inputs. Validate all managed identities and guest/template collisions before selection.
 An optional `ansible_ssh_private_key_file` uses the existing inventory convention.
 
+The existing `vlan` field specifies the guest NIC independently of the source VLAN.
+Read only the selected source's original VLAN from authenticated API configuration,
+reconstruct its immutable template request and require its ready identity to match.
+Native admission repeats complete source identity/configuration/disk verification;
+API/native disagreement fails before writes. Bridge, storage and pinned image inputs
+remain shared and unchanged. Template-only commands retain their existing immutable
+VLAN behavior. No source-VLAN inventory field is added.
+
 `make provision INVENTORY=... TARGETS=...` is a read-only live plan. `APPLY=1`
 permits fresh allocation/preparation only. `make verify` performs read-only baseline
 checks for explicit selected ready guests. Controller-only Ansible playbooks expose
@@ -69,6 +77,9 @@ name and ownership marker in the clone operation; verify the resulting owned clo
 before further changes. Configure CPU host, exact cores/RAM, balloon disabled,
 static network/VLAN/resolvers, short name plus search domain, cloud-init account
 and keys, guest agent enabled, `ciupgrade=0`, and `onboot=0`; grow the root disk.
+Explicitly configure the clone NIC's desired tag (or no tag), preserving its generated
+MAC address. Bind guest VLAN separately into the guest baseline digest, and admit
+the guest's tagged-network prerequisite even when its source is untagged.
 Verify managed disks and native snapshot capability for the future #5 consumer.
 Before first start, replace the owned clone's generated IDE cloud-init seed with
 a generated seed on `scsi1`, using its existing VirtIO SCSI controller. The pinned

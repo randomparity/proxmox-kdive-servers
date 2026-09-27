@@ -45,7 +45,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValidationError("API redirect refused; configure the direct verified endpoint")
 
 
-def api_admission(host):
+def api_admission(host, *, source=False):
     def deadline_expired(signum, frame):
         raise ValidationError("API admission exceeded its total deadline")
 
@@ -66,10 +66,13 @@ def api_admission(host):
         )
         base = f"https://{host['proxmox_api_host']}:{host.get('proxmox_api_port', 8006)}/api2/json"
         responses = []
-        for path in [
+        paths = [
             f"/nodes/{host['proxmox_node']}/status",
             f"/nodes/{host['proxmox_node']}/storage/{host['storage']}/status",
-        ]:
+        ]
+        if source:
+            paths.append(f"/nodes/{host['proxmox_node']}/qemu/{host['template_vmid']}/config")
+        for path in paths:
             request = urllib.request.Request(
                 base + path, headers={"Authorization": f"PVEAPIToken={user}!{token}={secret}"}
             )
@@ -90,7 +93,7 @@ def api_admission(host):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
-    node, storage = responses
+    node, storage = responses[:2]
     cpu = node.get("cpuinfo", {})
     memory = node.get("memory", {})
     require(
@@ -111,6 +114,7 @@ def api_admission(host):
         "API",
         "selected storage must be active image-capable zfspool or lvmthin",
     )
+    return responses[2] if source else None
 
 
 def request_for(host, apply, resume):

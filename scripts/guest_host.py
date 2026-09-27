@@ -44,7 +44,8 @@ def identity(request):
             "schema": 1,
             "management": 1,
             "template": template_host.identity(request["template"]),
-            "guest": {key: request["host"][key] for key in BASELINE_FIELDS},
+            "guest": {key: request["host"][key] for key in BASELINE_FIELDS}
+            | {"vlan": request["host"].get("vlan")},
         }
     )
 
@@ -73,8 +74,7 @@ def validate_request(request):
                 ("bridge", "bridge"),
                 ("cpu", "cpu"),
             )
-        )
-        and h.get("vlan") == t["vlan"],
+        ),
         "Template and guest inputs differ",
     )
     check(h["vmid"] != h["template_vmid"], "Guest and template IDs collide")
@@ -179,6 +179,16 @@ def desired_config(request):
     }
 
 
+def desired_network(request, config):
+    h = request["host"]
+    mac = template_host.properties(config.get("net0")).get("virtio")
+    check(
+        isinstance(mac, str) and re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", mac),
+        "Missing cloned NIC identity; inspect retained guest",
+    )
+    return f"virtio={mac},bridge={h['bridge']}" + (f",tag={h['vlan']}" if "vlan" in h else "")
+
+
 def check_configuration(request, config, pending, phase):
     expected = desired_config(request)
     check(
@@ -274,7 +284,7 @@ def admission(requests):
     storages = {}
     for r in requests:
         t = r["template"]
-        storages[t["storage"]] = template_host.host_admission(t)
+        storages[t["storage"]] = template_host.host_admission(dict(t, vlan=r["host"].get("vlan")))
         check(template_host.existing_resource(t), "Selected template is absent")
         marker_value = "kdive-template-v1:" + template_host.identity(t) + ":ready"
         config = template_host.verify_configuration(
@@ -339,6 +349,7 @@ def clone(request):
         "New clone ownership/state differs; inspect partial allocation",
     )
     options = desired_config(request)
+    options["net0"] = desired_network(request, config)
     with tempfile.NamedTemporaryFile(mode="w", prefix="kdive-guest-keys-") as keys:
         keys.write(options.pop("sshkeys"))
         keys.flush()

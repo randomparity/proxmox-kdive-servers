@@ -32,6 +32,18 @@ class TestValidation(unittest.TestCase):
         self.host["profile"] = "fedora"
         self.assertEqual(validate_inventory(self.data), 4)
 
+    def test_shared_template_allows_independent_guest_vlan_only(self):
+        other = self.data["_meta"]["hostvars"]["fedora_remote"]
+        other.update(
+            profile=self.host["profile"], template_vmid=self.host["template_vmid"], vlan=25
+        )
+        self.assertEqual(validate_inventory(self.data), 4)
+        with self.assertRaises(ValidationError):
+            validate_inventory(self.data, purpose="templates")
+        other["bridge"] = "vmbr1"
+        with self.assertRaises(ValidationError):
+            validate_inventory(self.data)
+
     def test_invalid_field_types_and_values(self):
         cases = {
             "profile": [None, "unknown", True, "{{ lookup('env', 'SECRET') }}"],

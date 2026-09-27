@@ -26,7 +26,14 @@ def request():
     host = managed_hosts(load_inventory(ROOT / "inventory/example.yml"))["ubuntu_local"]
     host["storage"] = "pool"
     host.pop("vlan", None)
-    return guests.request_for(host, "a" * 40)
+    source = {
+        "template": 1,
+        "net0": "virtio=02:11:22:33:44:55,bridge=vmbr0",
+        "description": "kdive-template-v1:"
+        + guest_host.template_host.identity(guests.templates.request_for(host, False, False))
+        + ":ready",
+    }
+    return guests.request_for(host, "a" * 40, source)
 
 
 class TestGuestHost(unittest.TestCase):
@@ -69,10 +76,26 @@ class TestGuestHost(unittest.TestCase):
             ("memory_mib", 2048),
             ("cores", 3),
             ("ansible_user", "other"),
+            ("vlan", 25),
         ]:
             other = copy.deepcopy(self.request)
             other["host"][key] = value
             self.assertNotEqual(guest_host.identity(other), identity)
+
+    def test_guest_vlan_is_independent_of_verified_source(self):
+        self.host["vlan"] = 25
+        guest_host.validate_request(self.request)
+        source = {"net0": "virtio=02:11:22:33:44:55,bridge=vmbr0,tag=30", "template": 1}
+        template = dict(self.request["template"], vlan=30)
+        source["description"] = (
+            "kdive-template-v1:" + guest_host.template_host.identity(template) + ":ready"
+        )
+        resolved = guests.request_for(self.host, "a" * 40, source)
+        self.assertEqual(resolved["template"], template)
+        self.assertEqual(resolved["host"]["vlan"], 25)
+        for field, value in [("net0", "virtio=bad,bridge=vmbr0,tag=0"), ("description", "foreign")]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                guests.request_for(self.host, "a" * 40, dict(source, **{field: value}))
 
     def test_acknowledgement_cannot_mark_another_guest_ready(self):
         expected = {
@@ -348,6 +371,10 @@ class GuestNativeFixture:
             config = copy.deepcopy(self.template.config)
             config.pop("template")
             config.update(name=opts["--name"], description=opts["--description"])
+            config["net0"] = (
+                f"virtio=02:00:00:00:{vmid // 256:02x}:{vmid % 256:02x},"
+                + config["net0"].split(",", 1)[1]
+            )
             config["digest"] = "a" * 40
             config["smbios1"] = f"uuid=00000000-0000-4000-8000-{vmid:012d}"
             for slot in ("scsi0", "ide2", "efidisk0"):
@@ -490,6 +517,67 @@ class TestNativeLifecycle(unittest.TestCase):
         ):
             guest_host.session([self.req], mode)
         return [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_clone_configures_guest_vlan_without_changing_source(self):
+        initial = copy.deepcopy(self.fixture.template.config)
+        for source_vlan, guest_vlan in itertools.product((None, 30), (None, 25)):
+            with self.subTest(source=source_vlan, guest=guest_vlan):
+                self.fixture.guests.clear()
+                self.fixture.volumes.clear()
+                self.fixture.template.config = copy.deepcopy(initial)
+                self.req["host"].pop("vlan", None)
+                if guest_vlan is not None:
+                    self.req["host"]["vlan"] = guest_vlan
+                self.req["template"]["vlan"] = source_vlan
+                if source_vlan is not None:
+                    self.fixture.template.config["net0"] += f",tag={source_vlan}"
+                self.fixture.template.config["description"] = (
+                    "kdive-template-v1:"
+                    + guest_host.template_host.identity(self.req["template"])
+                    + ":ready"
+                )
+                original = copy.deepcopy(self.fixture.template.config)
+                self.execute("apply")
+                net = guest_host.template_host.properties(
+                    self.fixture.guests[1101]["config"]["net0"]
+                )
+                self.assertEqual(net.get("tag"), str(guest_vlan) if guest_vlan else None)
+                self.assertEqual(net["virtio"], "02:00:00:00:04:4d")
+                self.assertNotEqual(
+                    net["virtio"], guest_host.template_host.properties(original["net0"])["virtio"]
+                )
+                self.assertEqual(self.fixture.template.config, original)
+                self.fixture.calls.clear()
+                self.execute("apply")
+                self.assertFalse(
+                    any(c[:2] in (["qm", "set"], ["qm", "clone"]) for c in self.fixture.calls)
+                )
+
+    def test_source_api_native_disagreement_fails_before_write(self):
+        self.fixture.template.config["net0"] += ",tag=30"
+        self.fixture.template.config["description"] = (
+            "kdive-template-v1:"
+            + guest_host.template_host.identity(dict(self.req["template"], vlan=30))
+            + ":ready"
+        )
+        with self.assertRaisesRegex(guest_host.GuestError, "Template identity/phase"):
+            self.execute("apply")
+        self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
+
+    def test_tagged_guest_requires_network_support_even_with_untagged_source(self):
+        self.req["host"]["vlan"] = 25
+        self.fixture.template.bridge.update(bridge_vlan_aware=0, bridge_ports="")
+        with self.assertRaisesRegex(guest_host.GuestError, "Tagged network"):
+            self.execute("apply")
+        self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
+
+    def test_changed_source_vlan_cannot_be_adopted_without_matching_identity(self):
+        self.fixture.template.config["net0"] += ",tag=30"
+        self.req["template"]["vlan"] = 30
+        self.req["host"]["vlan"] = 25
+        with self.assertRaisesRegex(guest_host.GuestError, "Template identity/phase"):
+            self.execute("apply")
+        self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
 
     def test_fresh_ready_rerun_and_selected_drift_preserve_resources(self):
         events = self.execute("plan")

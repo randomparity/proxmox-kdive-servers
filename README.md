@@ -80,7 +80,7 @@ Other groups may coexist, but these checks only validate managed `kdive` hosts.
 | `gateway`, `dns_servers` | Different usable gateway in the subnet; non-empty IPv4 DNS list |
 | `ansible_user`, `ssh_public_keys` | Guest account and non-empty OpenSSH public-key list (Ed25519/RSA/NIST ECDSA) |
 | `cores`, `memory_mib`, `disk_gib` | Positive integer sizing, at most 2147483647; no Boolean/string coercion |
-| `vlan` | Optional integer 1–4094; propagated to the template NIC |
+| `vlan` | Optional integer 1–4094; desired guest NIC tag for provisioning, template NIC tag for template operations |
 | `template_vmid`, `cpu` | Explicit template ID 100–999999999 and literal `host` CPU |
 | `proxmox_ssh_host`, `proxmox_ssh_user`, `proxmox_ssh_port` | Native host SSH endpoint, root-capable login, port default 22 |
 | `proxmox_ssh_private_key_file` | Optional private-key path; blank/omitted uses normal SSH identities |
@@ -213,6 +213,15 @@ short first DNS label becomes the guest hostname; the remainder becomes its DNS
 search domain. For example, `ubuntu-local.example.invalid` identifies a guest
 independently of its static `ansible_host`. External DNS records remain operator
 owned. Guest validation also checks template inputs and guest/template ID collisions.
+
+Guest provisioning reads the selected source's original VLAN through the authenticated
+API and revalidates its exact immutable identity and configuration through native SSH.
+The guest's requested VLAN is bound separately and applied while preserving the cloned
+NIC's MAC address. Tagged and untagged guests can share a source template without
+changing that template. The API token therefore needs selected-template configuration
+audit access as well as node/storage visibility. Template-only operations still use
+their supplied VLAN as an immutable template input; retain the original template inputs
+when operating that lifecycle.
 
 Keep the private inventory directory mode 0700. Provisioning creates its
 `known_hosts` file mode 0600 for guest SSH pins. Fresh owned clones use OpenSSH

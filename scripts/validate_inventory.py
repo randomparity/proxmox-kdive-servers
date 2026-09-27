@@ -303,6 +303,8 @@ def validate_inventory(data, targets=None, purpose="guests"):
             names.add(host["fqdn"])
         vmid = host["template_vmid"]
         inputs = template_inputs(host)
+        if purpose == "guests":
+            inputs.pop("vlan")
         require(
             vmid not in templates or templates[vmid] == inputs,
             "template_vmid",

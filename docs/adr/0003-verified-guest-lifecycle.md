@@ -15,6 +15,9 @@ Test use may change guest state; provisioning must not silently reset it.
 
 Extend ordinary inventory with unique guest `fqdn`, separate from SSH IPv4.
 Retain native template identity and create owned, full-cloned guest resources.
+Resolve the source's original VLAN from authenticated configuration and fully recheck
+its identity before mutation. Bind and configure the ordinary inventory guest VLAN
+independently, preserving the clone MAC and immutable source template.
 Use a versioned configuration digest and preparing/ready marker. Only a fresh
 owned clone receives management preparation. A ready rerun only verifies; drift
 and partial state require operator inspection, never automatic replacement.

@@ -37,7 +37,25 @@ else:
     )
 
 
-def request_for(host, revision):
+def request_for(host, revision, source):
+    require(isinstance(source, dict), "source template", "missing authenticated configuration")
+    net = guest_host.template_host.properties(source.get("net0"))
+    tag = net.get("tag")
+    require(
+        "tag" not in net or isinstance(tag, str) and re.fullmatch(r"[1-9][0-9]{0,3}", tag),
+        "source template",
+        "invalid native VLAN metadata",
+    )
+    template = templates.request_for(host, False, False)
+    template["vlan"] = int(tag) if "tag" in net else None
+    guest_host.template_host.validate_request(template)
+    require(
+        source.get("template") == 1
+        and source.get("description")
+        == "kdive-template-v1:" + guest_host.template_host.identity(template) + ":ready",
+        "source template",
+        "ownership differs; inspect immutable template inputs",
+    )
     fields = set(guest_host.BASELINE_FIELDS) | {
         "profile",
         "ansible_host",
@@ -61,7 +79,7 @@ def request_for(host, revision):
     }
     return {
         "host": {k: v for k, v in host.items() if k in fields},
-        "template": templates.request_for(host, False, False),
+        "template": template,
         "revision": revision,
     }
 
@@ -412,7 +430,7 @@ def main():
         groups = {}
         for alias in args.targets.split(","):
             host = hosts[alias]
-            templates.api_admission(host)
+            source = templates.api_admission(host, source=True)
             key = tuple(
                 host.get(k)
                 for k in (
@@ -423,7 +441,7 @@ def main():
                     "proxmox_ssh_private_key_file",
                 )
             )
-            groups.setdefault(key, []).append(request_for(host, revision))
+            groups.setdefault(key, []).append(request_for(host, revision, source))
         mode = "verify" if args.verify else "apply" if args.apply else "plan"
         # Admit every selected host before the first mutating batch; each apply rechecks under lock.
         if mode == "apply":
