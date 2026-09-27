@@ -2,8 +2,9 @@
 
 This repository prepares clean Linux VMs for
 [KDIVE validation](https://github.com/randomparity/kdive/issues/2803).
-It provides offline inventory checks and verified, unbooted Proxmox templates for
-four Linux families. Guest provisioning, snapshots and KDIVE installation follow separately.
+It provides offline inventory checks, verified Proxmox templates, and full-clone
+guests with a verified nested-KVM baseline for four Linux families. Snapshot lifecycle
+and KDIVE installation follow separately.
 
 ## Controller setup
 
