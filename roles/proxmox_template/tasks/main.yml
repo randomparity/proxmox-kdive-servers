@@ -1,0 +1,11 @@
+---
+- name: Plan or import the selected verified templates
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ playbook_dir }}/../scripts/templates.py"
+  register: proxmox_template_result
+  changed_when: >-
+    proxmox_template_result.stdout_lines | map('from_json') |
+    selectattr('action', 'in', ['created', 'resumed']) | list | length > 0
+  no_log: true
