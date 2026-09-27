@@ -435,6 +435,52 @@ def read_line(timeout):
     return json.loads(line)
 
 
+def verify_readiness(request, fresh):
+    phase = "preparing" if fresh else "ready"
+    config = inspect_guest(request, phase=phase)
+    guest_uuid = guest_verify.machine_uuid(
+        template_host.properties(config.get("smbios1")).get("uuid")
+    )
+    emit(request, "prepared", fresh=fresh, guest_uuid=guest_uuid)
+    # SSH 600s + guest RPC 1800s + transport margin.
+    verify_ack(request, read_line(2500))
+    if fresh and request["host"]["profile"] == "opensuse":
+        check(
+            inspect_guest(request, phase=phase) == config,
+            "Guest configuration changed before reboot; inspect retained partial",
+        )
+        emit(request, "reboot", guest_uuid=guest_uuid)
+        # One reboot RPC 60s + strict reconnect 600s + read-only RPC 1800s + margin.
+        verify_ack(request, read_line(2700))
+    command(["qm", "agent", str(request["host"]["vmid"]), "ping"], timeout=60)
+    ready_input = inspect_guest(request, phase=phase)
+    check(ready_input == config, "Guest configuration changed during readiness")
+    if fresh:
+        check(
+            isinstance(config.get("digest"), str)
+            and re.fullmatch(r"[a-f0-9]{40}", config["digest"]),
+            "Missing native readiness digest",
+        )
+        command(
+            [
+                "qm",
+                "set",
+                str(request["host"]["vmid"]),
+                "--description",
+                marker(request, "ready"),
+                "--digest",
+                config["digest"],
+            ]
+        )
+    result = inspect_guest(request)
+    check(
+        {k: v for k, v in result.items() if k not in {"description", "digest"}}
+        == {k: v for k, v in config.items() if k not in {"description", "digest"}},
+        "Guest configuration changed during ready marking",
+    )
+    return result
+
+
 def session(requests, mode):
     check(mode in {"plan", "apply", "verify"}, "Invalid guest operation")
     check(isinstance(requests, list) and 0 < len(requests) <= 100, "Invalid selected batch")
@@ -456,26 +502,7 @@ def session(requests, mode):
                 continue
             if not present:
                 clone(request)
-            config = inspect_guest(request, phase="ready" if present else "preparing")
-            guest_uuid = guest_verify.machine_uuid(
-                template_host.properties(config.get("smbios1")).get("uuid")
-            )
-            emit(request, "prepared", fresh=not present, guest_uuid=guest_uuid)
-            # Cover 600s SSH readiness, 1800s verification and transport margin.
-            verify_ack(request, read_line(2500))
-            command(["qm", "agent", str(request["host"]["vmid"]), "ping"], timeout=60)
-            if not present:
-                inspect_guest(request, phase="preparing")
-                command(
-                    [
-                        "qm",
-                        "set",
-                        str(request["host"]["vmid"]),
-                        "--description",
-                        marker(request, "ready"),
-                    ]
-                )
-            config = inspect_guest(request)
+            config = verify_readiness(request, fresh=not present)
             emit(
                 request,
                 "ready",

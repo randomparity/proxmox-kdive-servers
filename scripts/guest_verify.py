@@ -1,16 +1,21 @@
 """Management-only preparation and reusable Linux guest baseline verification."""
 
 import fcntl
+import hashlib
 import json
 import os
 import platform
 import re
+import select
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
+import time
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -32,6 +37,211 @@ def command(argv, timeout=60):
         ) from None
     check(result.returncode == 0, "Guest command failed; inspect cloud-init, packages and services")
     return result.stdout
+
+
+OPENSUSE_KERNEL = "6.12.0-160000.38-default"
+OPENSUSE_PACKAGES = {
+    "kernel-default": "6.12.0-160000.38.1",
+    "ucode-intel": "20260812-160000.1.1",
+}
+OPENSUSE_BASE = "6.12.0-160000.38.1.160000.2.24"
+
+
+def validate_kernel_transaction(summary):
+    check(
+        summary.get("packages-to-change") == "3"
+        and len(summary) == 2
+        and {child.tag for child in summary} == {"to-install", "to-remove"},
+        "Kernel transaction actions differ; inspect vendor repository state",
+    )
+    for action, expected, repository in (
+        ("to-install", OPENSUSE_PACKAGES, "@commandline"),
+        ("to-remove", {"kernel-default-base": OPENSUSE_BASE}, "@System"),
+    ):
+        packages = list(summary.find(action))
+        check(
+            len(packages) == len(expected)
+            and {
+                (
+                    p.tag,
+                    p.get("type"),
+                    p.get("name"),
+                    p.get("edition"),
+                    p.get("arch"),
+                    p.get("repository"),
+                )
+                for p in packages
+            }
+            == {
+                ("solvable", "package", name, version, "x86_64", repository)
+                for name, version in expected.items()
+            },
+            "Kernel transaction packages differ; inspect pinned prerequisite",
+        )
+
+
+def confirm_kernel_transaction(argv, timeout=900):
+    parser = ET.XMLPullParser(events=("end",))
+    deadline, size, reviewed, confirmed = time.monotonic() + timeout, 0, False, False
+    with subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+        env=dict(os.environ, LC_ALL="C"),
+    ) as process:
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                check(
+                    remaining > 0 and select.select([process.stdout], [], [], remaining)[0],
+                    "Kernel transaction timed out; inspect retained preparing guest",
+                )
+                chunk = os.read(process.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                size += len(chunk)
+                check(size <= 1048576, "Kernel transaction output exceeded bound")
+                parser.feed(chunk)
+                for _, element in parser.read_events():
+                    check(
+                        not (element.tag == "message" and element.get("type") == "error"),
+                        "Kernel transaction reported an error; inspect retained partial",
+                    )
+                    if element.tag == "install-summary":
+                        check(not reviewed, "Repeated kernel transaction summary")
+                        validate_kernel_transaction(element)
+                        reviewed = True
+                    if element.tag == "prompt":
+                        check(
+                            reviewed and not confirmed and element.get("id") == "0",
+                            "Unexpected kernel transaction prompt; no further confirmation",
+                        )
+                        process.stdin.write(b"y\n")
+                        process.stdin.flush()
+                        confirmed = True
+            parser.close()
+            check(
+                confirmed and process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0,
+                "Kernel transaction failed; inspect retained preparing guest",
+            )
+        except (ET.ParseError, OSError, subprocess.SubprocessError):
+            raise GuestError(
+                "Kernel transaction failed; inspect retained preparing guest"
+            ) from None
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+def download_kernel_packages(directory):
+    repository = "openSUSE:repo-oss"
+    repos = ET.fromstring(command(["zypper", "--xmlout", "--no-refresh", "repos", "--details"]))
+    selected = [p for p in repos.iter("repo") if p.get("alias") == repository]
+    check(
+        len(selected) == 1
+        and all(selected[0].get(k) == "1" for k in ("enabled", "gpgcheck", "repo_gpgcheck")),
+        "Vendor repository signature policy differs; inspect without weakening trust",
+    )
+    command(
+        [
+            "zypper",
+            "--xmlout",
+            "--non-interactive",
+            "--no-refresh",
+            "--pkg-cache-dir",
+            directory,
+            "download",
+            "--repo",
+            repository,
+        ]
+        + [name + "=" + version for name, version in OPENSUSE_PACKAGES.items()],
+        timeout=600,
+    )
+    files = list(Path(directory).rglob("*.rpm"))
+    expected = {f"{name}-{version}.x86_64.rpm": name for name, version in OPENSUSE_PACKAGES.items()}
+    check(
+        len(files) == 2 and {p.name for p in files} == set(expected),
+        "Downloaded kernel packages differ; inspect pinned vendor versions",
+    )
+    for path in files:
+        check(
+            not path.is_symlink()
+            and path.is_file()
+            and path.resolve().is_relative_to(Path(directory).resolve()),
+            "Downloaded kernel package path differs",
+        )
+        name = expected[path.name]
+        check(
+            command(
+                ["rpm", "-qp", "--qf", "%{NAME}|%{VERSION}-%{RELEASE}|%{ARCH}", str(path)]
+            ).strip()
+            == f"{name}|{OPENSUSE_PACKAGES[name]}|x86_64",
+            "Downloaded kernel package identity differs",
+        )
+        signature = command(["rpm", "-qp", "--qf", "%{RSAHEADER:pgpsig}", str(path)]).strip()
+        check(
+            signature.startswith("RSA/") and "," in signature,
+            "Vendor kernel package lacks signature; inspect repository",
+        )
+        command(["rpm", "--checksig", str(path)])
+    return sorted(str(path) for path in files)
+
+
+def verify_opensuse_packages():
+    check(platform.release() == OPENSUSE_KERNEL, "Pinned openSUSE running kernel differs")
+    names = command(["rpm", "-qa", "--qf", "%{NAME}\n"]).splitlines()
+    check("kernel-default-base" not in names, "Base kernel variant remains installed")
+    for name, version in OPENSUSE_PACKAGES.items():
+        check(
+            command(["rpm", "-q", "--qf", "%{EPOCHNUM}:%{VERSION}-%{RELEASE}", name]).strip()
+            == "0:" + version,
+            "Pinned openSUSE prerequisite package differs",
+        )
+
+
+def prepare_opensuse_kernel():
+    check(platform.release() == OPENSUSE_KERNEL, "Pinned openSUSE running kernel differs")
+    check(
+        command(
+            ["rpm", "-q", "--qf", "%{NAME}|%{VERSION}-%{RELEASE}|%{ARCH}", "kernel-default-base"]
+        ).strip()
+        == f"kernel-default-base|{OPENSUSE_BASE}|x86_64",
+        "Fresh openSUSE kernel variant differs; inspect owned partial",
+    )
+    security_state("opensuse")
+    check(
+        shutil.disk_usage("/").free >= 512 * 1024**2,
+        "Insufficient guest free space for pinned kernel prerequisite",
+    )
+    kernel = Path("/boot/vmlinuz-" + OPENSUSE_KERNEL)
+    before = hashlib.sha256(kernel.read_bytes()).digest()
+    with tempfile.TemporaryDirectory(prefix="kdive-kernel-") as directory:
+        files = download_kernel_packages(directory)
+        confirm_kernel_transaction(
+            [
+                "zypper",
+                "--xmlout",
+                "--no-refresh",
+                "install",
+                "--no-recommends",
+                "--",
+                *files,
+                "-kernel-default-base",
+            ]
+        )
+    verify_opensuse_packages()
+    check(
+        hashlib.sha256(kernel.read_bytes()).digest() == before,
+        "Installed kernel binary changed; inspect preparing guest before reboot",
+    )
+    security_state("opensuse")
 
 
 def kvm_probe():
@@ -72,6 +282,8 @@ def prepare(profile):
             raise GuestError(
                 "Pinned guest agent missing; inspect image identity before preparation"
             )
+    if profile == "opensuse":
+        prepare_opensuse_kernel()
     command(["systemctl", "enable", "--now", "qemu-guest-agent"], timeout=120)
     flags = Path("/proc/cpuinfo").read_text().split()
     module = "kvm_intel" if "vmx" in flags else "kvm_amd" if "svm" in flags else None
@@ -102,6 +314,11 @@ def security_state(profile):
         Path("/sys/fs/selinux/enforce").read_text().strip() == "1",
         "SELinux not enforcing; inspect security baseline",
     )
+    if profile == "opensuse":
+        check(
+            "[integrity]" in Path("/sys/kernel/security/lockdown").read_text().split(),
+            "openSUSE kernel lockdown differs; preserve signed module enforcement",
+        )
     return "selinux-enforcing"
 
 
@@ -113,6 +330,9 @@ def package_versions(profile):
         "qemu-guest-agent",
         "python3-base" if profile == "opensuse" else "python3",
     ]
+    if profile == "opensuse":
+        verify_opensuse_packages()
+        names += list(OPENSUSE_PACKAGES)
     versions = {}
     for name in names:
         argv = (
@@ -179,6 +399,7 @@ def observation(request):
     memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
     filesystem = os.statvfs("/")
     return identity_observation() | {
+        "boot_id": machine_uuid(Path("/proc/sys/kernel/random/boot_id").read_text()),
         "cpus": os.cpu_count(),
         "memory_bytes": int(memory["MemTotal"].split()[0]) * 1024,
         "crash_reserved_bytes": crash_reservation(),
@@ -216,6 +437,7 @@ def validate_identity(request, result):
 
 def validate_observation(request, result):
     validate_identity(request, result)
+    machine_uuid(result.get("boot_id"))
     host = request["host"]
     check(
         type(result.get("cpus")) is int and result["cpus"] == host["cores"],
@@ -300,14 +522,32 @@ def run(request, fresh=False):
     return result
 
 
+def reboot(request, previous_boot):
+    check(os.geteuid() == 0 and platform.system() == "Linux", "Reboot requires Linux and sudo")
+    check(request["host"]["profile"] == "opensuse", "Unexpected guest reboot profile")
+    validate_identity(request, identity_observation())
+    check(
+        machine_uuid(Path("/proc/sys/kernel/random/boot_id").read_text())
+        == machine_uuid(previous_boot),
+        "Guest boot changed before reboot; inspect partial",
+    )
+    command(["systemctl", "--no-block", "reboot"], timeout=30)
+    return {"reboot_requested": True}
+
+
 def main():
     try:
         envelope = json.loads(sys.stdin.read(65537))
-        check(
-            set(envelope) == {"request", "fresh"} and type(envelope["fresh"]) is bool,
-            "Invalid guest verification request",
-        )
-        print(json.dumps(run(envelope["request"], envelope["fresh"]), sort_keys=True))
+        check(isinstance(envelope, dict), "Invalid guest request")
+        if set(envelope) == {"request", "reboot_from"}:
+            result = reboot(envelope["request"], envelope["reboot_from"])
+        else:
+            check(
+                set(envelope) == {"request", "fresh"} and type(envelope["fresh"]) is bool,
+                "Invalid guest verification request",
+            )
+            result = run(envelope["request"], envelope["fresh"])
+        print(json.dumps(result, sort_keys=True))
     except (GuestError, OSError, ValueError, KeyError, TypeError, AttributeError):
         print(
             "Guest baseline failed; inspect private cloud-init, identity, sizing, security and KVM",

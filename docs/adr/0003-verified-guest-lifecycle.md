@@ -26,8 +26,14 @@ Hold native cooperating locks through readiness and keep shared template locks.
 Use existing controller Python/native tools with a common guest verifier.
 First-contact guest SSH key pinning is authorized on the trusted lab network;
 subsequent access is strict and never replaces a stored key. Disable general
-cloud-init package upgrades and preserve guest kernel/security policy. Loading
-the installed guest KVM module is a prerequisite, not host reconfiguration.
+cloud-init package upgrades and preserve guest security policy. Loading the guest
+KVM module is a prerequisite, not host reconfiguration. The operator separately
+approved one pinned openSUSE exception: replace its minimal kernel package with
+the matching full vendor package and resolved microcode package, then gracefully
+reboot that fresh guest once before readiness. Preserve the kernel build, source
+template and all other guests. Exact package/signature/transaction checks and
+strict same-UUID, changed-boot-identity verification bound this exception; failure
+retains a preparing partial and never authorizes another reboot or automatic repair.
 
 ## Consequences
 

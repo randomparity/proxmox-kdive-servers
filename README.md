@@ -271,8 +271,21 @@ an inspectable partial; reruns do not resume or repair it.
 Only fresh clones receive management preparation: the pinned Ubuntu image needs
 `qemu-guest-agent`; the other three already contain it. Existing SSH/sudo/Python/
 cloud-init are checked. The installed guest KVM vendor module is loaded and named
-in `/etc/modules-load.d/kdive-kvm.conf` for reboot readiness. Missing modules fail;
-no kernel, libvirt, KDIVE, build/debug tooling or runners are installed.
+in `/etc/modules-load.d/kdive-kvm.conf` for reboot readiness.
+The pinned openSUSE Minimal-VM image contains `kernel-default-base` without KVM
+modules. Fresh openSUSE provisioning replaces that exact base package
+`6.12.0-160000.38.1.160000.2.24` with signed `kernel-default 6.12.0-160000.38.1`
+and `ucode-intel 20260812-160000.1.1`. It verifies the two RPM identities/signatures
+and the actual native transaction before its sole confirmation. No other package
+action is accepted. Normal vendor RPM scriptlets update guest boot artifacts;
+the running kernel build and kernel binary must remain unchanged. SELinux and
+integrity lockdown stay enforced. Other missing vendor KVM modules fail.
+After initial verification, fresh openSUSE receives one graceful authenticated
+`systemctl --no-block reboot` request. Strict reconnect must prove the same VM
+UUID, changed boot identity and full baseline again before ready marking. A
+failure or ambiguous disconnect retains the partial; there is no forced power
+fallback, reboot retry or automatic recovery. Ready reruns remain read-only.
+No libvirt, KDIVE, build/debug tooling or runners are installed.
 
 Verification checks successful cloud-init, authenticated SSH/noninteractive sudo,
 actual OS/release/x86_64, hostname/FQDN/static IPv4, CPU/RAM/root filesystem, active
@@ -282,7 +295,7 @@ This proves capability; KDIVE owns later virtualization permissions and workload
 Before any guest preparation, read-only checks match the guest DMI UUID to the
 owned VM's native SMBIOS UUID and verify its OS and network identity. A stale IP
 cannot authorize preparation merely by accepting the configured SSH credential.
-The UUID travels privately and is excluded from public evidence.
+The UUID and boot identity travel privately and are excluded from public evidence.
 RAM evidence reports usable `memory_bytes` and measured `crash_reserved_bytes`
 separately. Allocation proof requires their sum to be at least 90% of configured
 RAM, without changing the image's crash-kernel settings. Only the native sysfs

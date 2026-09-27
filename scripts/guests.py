@@ -149,53 +149,69 @@ def guest_ssh(host, known_hosts, fresh):
     return argv + ["--", host["ansible_host"]]
 
 
-def verify_guest(request, known_hosts, fresh, guest_uuid):
-    request = dict(request, guest_uuid=guest_verify.machine_uuid(guest_uuid))
-    prepare_known_hosts(known_hosts, fresh)
-    argv = guest_ssh(request["host"], known_hosts, fresh)
-    deadline = time.monotonic() + (600 if fresh else 30)
-    while True:
-        try:
-            probe = subprocess.run(argv + ["true"], capture_output=True, timeout=15, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            raise ValidationError(
-                "Guest SSH unavailable/timed out; inspect first-boot network"
-            ) from None
-        if probe.returncode == 0:
-            break
-        require(
-            time.monotonic() < deadline,
-            "Guest SSH",
-            "readiness deadline expired; inspect network/keys",
-        )
-        time.sleep(2)
-    # Only enrollment uses accept-new; the actual privileged operation is strictly pinned.
+def guest_rpc(request, known_hosts, envelope, timeout):
     argv = guest_ssh(request["host"], known_hosts, False)
     source = (ROOT / "scripts/guest_verify.py").read_text()
     try:
         result = subprocess.run(
             argv + ["sudo -n python3 -c " + shlex.quote(source)],
-            input=json.dumps({"request": request, "fresh": fresh}),
+            input=json.dumps(dict(envelope, request=request)),
             capture_output=True,
             text=True,
-            timeout=1800,
+            timeout=timeout,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise ValidationError(
-            "Guest verification timed out; inspect cloud-init and management state"
+            "Guest RPC timed out; inspect retained partial without retry"
         ) from None
     require(
-        result.returncode == 0, "Guest baseline", "verification failed; inspect private guest state"
-    )
-    require(
-        len(result.stdout) <= 65536 and not result.stderr.strip(),
+        result.returncode == 0 and len(result.stdout) <= 65536 and not result.stderr.strip(),
         "Guest baseline",
-        "unexpected output; inspect private guest state",
+        "operation failed; inspect private guest state",
     )
     try:
-        observed = json.loads(result.stdout)
+        return json.loads(result.stdout)
+    except ValueError:
+        raise ValidationError("Guest baseline: invalid result") from None
+
+
+def wait_guest(request, known_hosts, fresh, after_boot):
+    argv = guest_ssh(request["host"], known_hosts, fresh)
+    deadline = time.monotonic() + (600 if fresh or after_boot else 30)
+    while True:
+        try:
+            probe = subprocess.run(
+                argv + ["cat /proc/sys/kernel/random/boot_id" if after_boot else "true"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise ValidationError(
+                "Guest SSH unavailable/timed out; inspect guest network"
+            ) from None
+        if probe.returncode == 0:
+            if not after_boot or guest_verify.machine_uuid(probe.stdout) != after_boot:
+                return
+        require(
+            time.monotonic() < deadline,
+            "Guest SSH",
+            "readiness deadline expired; inspect network/keys/boot without retrying reboot",
+        )
+        time.sleep(2)
+
+
+def verify_guest(request, known_hosts, fresh, guest_uuid, after_boot=None):
+    request = dict(request, guest_uuid=guest_verify.machine_uuid(guest_uuid))
+    prepare_known_hosts(known_hosts, fresh)
+    wait_guest(request, known_hosts, fresh, after_boot)
+    observed = guest_rpc(request, known_hosts, {"fresh": fresh}, 1800)
+    try:
         guest_verify.validate_observation(request, observed)
+        if after_boot:
+            require(observed["boot_id"] != after_boot, "Guest boot", "reboot not established")
     except (ValueError, TypeError, KeyError):
         raise ValidationError("Guest baseline: invalid or mismatched result") from None
     packages = observed.get("packages")
@@ -208,7 +224,12 @@ def verify_guest(request, known_hosts, fresh, guest_uuid):
             "sudo",
             "qemu-guest-agent",
             "python3-base" if request["host"]["profile"] == "opensuse" else "python3",
-        },
+        }
+        | (
+            set(guest_verify.OPENSUSE_PACKAGES)
+            if request["host"]["profile"] == "opensuse"
+            else set()
+        ),
         "Guest baseline",
         "management package evidence incomplete",
     )
@@ -220,9 +241,19 @@ def verify_guest(request, known_hosts, fresh, guest_uuid):
         "Guest baseline",
         "invalid package version evidence",
     )
+    if request["host"]["profile"] == "opensuse":
+        require(
+            all(
+                packages[name] == "0:" + version
+                for name, version in guest_verify.OPENSUSE_PACKAGES.items()
+            ),
+            "Guest baseline",
+            "pinned kernel prerequisite evidence differs",
+        )
     return {
         key: observed[key]
         for key in (
+            "boot_id",
             "os_id",
             "release",
             "architecture",
@@ -280,6 +311,7 @@ def validate_event(request, event, phase):
     keys = {"vmid", "identity", "phase"} | {
         "planned": {"action"},
         "prepared": {"fresh", "guest_uuid"},
+        "reboot": {"guest_uuid"},
         "ready": {"action", "config_sha256", "duration_seconds"},
     }[phase]
     require(
@@ -294,6 +326,8 @@ def validate_event(request, event, phase):
     )
     if phase == "prepared":
         require(type(event["fresh"]) is bool, "Native guest", "invalid preparation phase")
+        guest_verify.machine_uuid(event["guest_uuid"])
+    elif phase == "reboot":
         guest_verify.machine_uuid(event["guest_uuid"])
     else:
         allowed = {"preserved", "would-create"} if phase == "planned" else {"preserved", "created"}
@@ -339,6 +373,31 @@ def read_event(process):
     return event
 
 
+def complete_guest(process, request, event, mode, known_hosts):
+    require(not event["fresh"] or mode == "apply", "Native guest", "unexpected mutation")
+    guest_uuid, fresh = event["guest_uuid"], event["fresh"]
+    observations = verify_guest(request, known_hosts, fresh, guest_uuid)
+    ack = {"vmid": event["vmid"], "identity": event["identity"], "verified": True}
+    process.stdin.write((json.dumps(ack) + "\n").encode())
+    process.stdin.flush()
+    event = read_event(process)
+    if fresh and request["host"]["profile"] == "opensuse":
+        validate_event(request, event, "reboot")
+        require(event["guest_uuid"] == guest_uuid, "Native guest", "reboot UUID changed")
+        boot = observations["boot_id"]
+        result = guest_rpc(
+            dict(request, guest_uuid=guest_uuid), known_hosts, {"reboot_from": boot}, 60
+        )
+        require(result == {"reboot_requested": True}, "Guest reboot", "invalid acknowledgement")
+        observations = verify_guest(request, known_hosts, False, guest_uuid, after_boot=boot)
+        process.stdin.write((json.dumps(ack) + "\n").encode())
+        process.stdin.flush()
+        event = read_event(process)
+    validate_event(request, event, "ready")
+    observations.pop("boot_id")
+    return event, observations
+
+
 def dispatch(requests, mode, known_hosts):
     argv = host_ssh(requests[0]["host"])
     try:
@@ -360,23 +419,9 @@ def dispatch(requests, mode, known_hosts):
                     validate_event(request, event, "planned" if mode == "plan" else "prepared")
                     observations = {}
                     if mode != "plan":
-                        require(
-                            not event["fresh"] or mode == "apply",
-                            "Native guest",
-                            "unexpected mutation",
+                        event, observations = complete_guest(
+                            process, request, event, mode, known_hosts
                         )
-                        observations = verify_guest(
-                            request, known_hosts, event["fresh"], event["guest_uuid"]
-                        )
-                        ack = {
-                            "vmid": event["vmid"],
-                            "identity": event["identity"],
-                            "verified": True,
-                        }
-                        process.stdin.write((json.dumps(ack) + "\n").encode())
-                        process.stdin.flush()
-                        event = read_event(process)
-                        validate_event(request, event, "ready")
                     outcomes.append(
                         {k: v for k, v in event.items() if k not in {"vmid", "phase"}}
                         | {

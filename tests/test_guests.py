@@ -341,8 +341,12 @@ class TestGuestVerifier(unittest.TestCase):
         with patch.object(guest_verify.Path, "read_text", return_value="0"):
             with self.assertRaises(guest_verify.GuestError):
                 guest_verify.security_state("rocky")
-        with patch.object(guest_verify.Path, "read_text", return_value="1"):
+        with patch.object(guest_verify.Path, "read_text", side_effect=["1", "none [integrity]"]):
             self.assertEqual(guest_verify.security_state("opensuse"), "selinux-enforcing")
+        for value in ("[none] integrity", "none integrity [confidentiality]", ""):
+            with patch.object(guest_verify.Path, "read_text", side_effect=["1", value]):
+                with self.assertRaises(guest_verify.GuestError):
+                    guest_verify.security_state("opensuse")
         with (
             patch.object(guest_verify.Path, "read_text", return_value="Y"),
             patch.object(
@@ -361,6 +365,7 @@ class TestGuestVerifier(unittest.TestCase):
         req["guest_uuid"] = "12345678-1234-1234-1234-123456789abc"
         observed = {
             "guest_uuid": req["guest_uuid"].upper(),
+            "boot_id": "12345678-1234-1234-1234-123456789abd",
             "os_id": "ubuntu",
             "release": "24.04",
             "architecture": "x86_64",
@@ -377,6 +382,7 @@ class TestGuestVerifier(unittest.TestCase):
         }
         guest_verify.validate_observation(req, observed)
         cases = {
+            "boot_id": "invalid",
             "guest_uuid": "87654321-1234-1234-1234-123456789abc",
             "os_id": "debian",
             "release": "22.04",
@@ -462,6 +468,329 @@ class TestGuestVerifier(unittest.TestCase):
             with self.assertRaises(guest_verify.GuestError):
                 guest_verify.kvm_probe()
             close.assert_called_once_with(11)
+
+
+class TestOpenSusePrerequisite(unittest.TestCase):
+    def summary(self):
+        return (
+            '<install-summary packages-to-change="3" need-reboot="1">'
+            '<to-install><solvable type="package" name="kernel-default" '
+            'edition="6.12.0-160000.38.1" arch="x86_64" repository="@commandline"/>'
+            '<solvable type="package" name="ucode-intel" '
+            'edition="20260812-160000.1.1" arch="x86_64" repository="@commandline"/>'
+            '</to-install><to-remove><solvable type="package" name="kernel-default-base" '
+            'edition="6.12.0-160000.38.1.160000.2.24" arch="x86_64" repository="@System"/>'
+            "</to-remove></install-summary>"
+        )
+
+    def test_actual_transaction_confirms_only_exact_plan(self):
+        self.assertTrue(callable(getattr(guest_verify, "confirm_kernel_transaction", None)))
+        import sys
+
+        body = self.summary() + '<prompt id="0"><text>Continue?</text></prompt>'
+        script = (
+            "import sys;print('<stream>' + " + repr(body) + ",flush=True);"
+            "answer=sys.stdin.readline();print('</stream>',flush=True);"
+            "sys.exit(0 if answer == 'y\\n' else 9)"
+        )
+        guest_verify.confirm_kernel_transaction([sys.executable, "-c", script], timeout=5)
+
+    def test_transaction_rejects_changed_actions_and_prompts(self):
+        self.assertTrue(callable(getattr(guest_verify, "confirm_kernel_transaction", None)))
+        import sys
+
+        summary = self.summary()
+        prompt = '<prompt id="0"><text>Continue?</text></prompt>'
+        bad = [
+            summary.replace("20260812-160000.1.1", "20260812-160000.1.2") + prompt,
+            summary.replace('arch="x86_64"', 'arch="aarch64"', 1) + prompt,
+            summary.replace('packages-to-change="3"', 'packages-to-change="4"') + prompt,
+            summary.replace("<to-install>", '<to-install><solvable name="extra"/>') + prompt,
+            summary.replace("</install-summary>", "<to-upgrade/></install-summary>") + prompt,
+            summary.replace('repository="@commandline"', 'repository="untrusted"') + prompt,
+            prompt + summary,
+            summary + prompt.replace('id="0"', 'id="1"'),
+            summary + prompt + prompt,
+            '<message type="error">failed</message>' + summary + prompt,
+            "<malformed>" + summary + prompt,
+        ]
+        for body in bad:
+            script = "import sys;print(" + repr("<stream>" + body + "</stream>") + ",flush=True)"
+            with self.subTest(body=body), self.assertRaises(guest_verify.GuestError):
+                guest_verify.confirm_kernel_transaction([sys.executable, "-c", script], timeout=5)
+
+    def exercise_prerequisite(self, fault=None):
+        self.assertTrue(callable(getattr(guest_verify, "prepare_opensuse_kernel", None)))
+        import sys
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kernel = root / "vmlinuz"
+            kernel.write_bytes(b"pinned kernel")
+            installed = root / "installed"
+            calls = []
+            real_path, popen = Path, subprocess.Popen
+            summary = self.summary()
+
+            def native(argv, **kwargs):
+                calls.append(argv)
+                output = ""
+                code = 0
+                if argv[0] == "zypper" and "repos" in argv:
+                    output = (
+                        '<stream><repo-list><repo alias="openSUSE:repo-oss" '
+                        'enabled="1" gpgcheck="1" repo_gpgcheck="1"/>'
+                        "</repo-list></stream>"
+                    )
+                elif argv[0] == "zypper" and "download" in argv:
+                    cache = Path(argv[argv.index("--pkg-cache-dir") + 1])
+                    for name, version in guest_verify.OPENSUSE_PACKAGES.items():
+                        (cache / f"{name}-{version}.x86_64.rpm").write_bytes(b"signed rpm")
+                elif argv[:2] == ["rpm", "-qp"]:
+                    filename = Path(argv[-1]).name
+                    if "%{RSAHEADER:pgpsig}" in argv:
+                        output = "RSA/SHA256, signature"
+                    else:
+                        name = next(
+                            n
+                            for n in guest_verify.OPENSUSE_PACKAGES
+                            if filename.startswith(n + "-")
+                        )
+                        output = f"{name}|{guest_verify.OPENSUSE_PACKAGES[name]}|x86_64"
+                elif argv[:2] == ["rpm", "--checksig"]:
+                    output = "digests signatures OK"
+                elif argv[:2] == ["rpm", "-q"]:
+                    if argv[-1] == "kernel-default-base":
+                        output = "kernel-default-base|6.12.0-160000.38.1.160000.2.24|x86_64"
+                    else:
+                        output = "0:" + guest_verify.OPENSUSE_PACKAGES[argv[-1]]
+                        if fault == "version":
+                            output += ".1"
+                elif argv[:2] == ["rpm", "-qa"]:
+                    output = (
+                        "kernel-default\nucode-intel\n"
+                        if installed.exists()
+                        else "kernel-default-base\n"
+                    )
+                else:
+                    raise AssertionError(argv)
+                return subprocess.CompletedProcess(argv, code, output, "")
+
+            def transaction(argv, **kwargs):
+                calls.append(argv)
+                self.assertNotIn("--non-interactive", argv)
+                self.assertEqual(argv[-1], "-kernel-default-base")
+                script = (
+                    "import pathlib,sys;print("
+                    + repr("<stream>" + summary + '<prompt id="0"/>')
+                    + ",flush=True);"
+                    "answer=sys.stdin.readline();assert answer == 'y\\n';"
+                    "pathlib.Path(" + repr(str(installed)) + ").write_text('yes');"
+                    "print('</stream>',flush=True)"
+                )
+                if fault == "install":
+                    script = script.replace(".write_text('yes')", ".write_text('yes');sys.exit(9)")
+                if fault == "binary":
+                    script += ";pathlib.Path(" + repr(str(kernel)) + ").write_bytes(b'changed')"
+                return popen([sys.executable, "-c", script], **kwargs)
+
+            def path(value):
+                if str(value).startswith("/boot/vmlinuz-"):
+                    return kernel
+                if str(value) == "/sys/fs/selinux/enforce":
+                    target = root / "selinux"
+                    target.write_text("1")
+                    return target
+                if str(value) == "/sys/kernel/security/lockdown":
+                    target = root / "lockdown"
+                    target.write_text(
+                        "[none] integrity"
+                        if fault == "security" and installed.exists()
+                        else "none [integrity] confidentiality"
+                    )
+                    return target
+                return real_path(value)
+
+            with (
+                patch.object(guest_verify, "Path", side_effect=path),
+                patch.object(
+                    guest_verify.platform, "release", return_value="6.12.0-160000.38-default"
+                ),
+                patch.object(
+                    guest_verify.shutil, "disk_usage", return_value=SimpleNamespace(free=1024**3)
+                ),
+                patch.object(guest_verify.subprocess, "run", side_effect=native),
+                patch.object(guest_verify.subprocess, "Popen", side_effect=transaction),
+            ):
+                if fault:
+                    with self.assertRaises(guest_verify.GuestError):
+                        guest_verify.prepare_opensuse_kernel()
+                else:
+                    guest_verify.prepare_opensuse_kernel()
+            self.assertTrue(installed.exists())
+            self.assertEqual(
+                kernel.read_bytes(), b"changed" if fault == "binary" else b"pinned kernel"
+            )
+            self.assertEqual(sum(c[:2] == ["rpm", "--checksig"] for c in calls), 2)
+
+    def test_signed_prerequisite_installs_exact_packages_and_preserves_kernel(self):
+        self.exercise_prerequisite()
+
+    def test_failed_transaction_or_changed_postconditions_never_continue(self):
+        for fault in ("install", "binary", "version", "security"):
+            with self.subTest(fault=fault):
+                self.exercise_prerequisite(fault)
+
+    def test_package_download_fails_before_install_on_trust_or_identity_drift(self):
+        for fault in (
+            "repository",
+            "download",
+            "missing",
+            "symlink",
+            "header",
+            "unsigned",
+            "signature",
+        ):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+
+                def native(argv, fault=fault, **kwargs):
+                    output, code = "", 0
+                    if "repos" in argv:
+                        output = (
+                            '<stream><repo alias="openSUSE:repo-oss" enabled="1" '
+                            'gpgcheck="1" repo_gpgcheck="'
+                            + ("0" if fault == "repository" else "1")
+                            + '"/></stream>'
+                        )
+                    elif "download" in argv:
+                        code = 1 if fault == "download" else 0
+                        for name, version in guest_verify.OPENSUSE_PACKAGES.items():
+                            file = Path(directory) / f"{name}-{version}.x86_64.rpm"
+                            if fault == "missing":
+                                break
+                            if fault == "symlink":
+                                file.symlink_to("/nonexistent")
+                            else:
+                                file.write_bytes(b"rpm")
+                    elif argv[:2] == ["rpm", "--checksig"]:
+                        code = 1 if fault == "signature" else 0
+                    elif "%{RSAHEADER:pgpsig}" in argv:
+                        output = "(none)" if fault == "unsigned" else "RSA/SHA256, signature"
+                    else:
+                        name = next(
+                            n
+                            for n in guest_verify.OPENSUSE_PACKAGES
+                            if Path(argv[-1]).name.startswith(n + "-")
+                        )
+                        output = f"{name}|{guest_verify.OPENSUSE_PACKAGES[name]}|x86_64"
+                        if fault == "header":
+                            output += "extra"
+                    return subprocess.CompletedProcess(argv, code, output, "")
+
+                with (
+                    patch.object(guest_verify.subprocess, "run", side_effect=native),
+                    self.assertRaises(guest_verify.GuestError),
+                ):
+                    guest_verify.download_kernel_packages(directory)
+
+    def test_prerequisite_rejects_kernel_variant_and_space_drift(self):
+        for fault in ("kernel", "base", "space"):
+            calls = []
+
+            def native(argv, fault=fault, calls=calls, **kwargs):
+                calls.append(argv)
+                output = (
+                    "wrong"
+                    if fault == "base"
+                    else "kernel-default-base|6.12.0-160000.38.1.160000.2.24|x86_64"
+                )
+                return subprocess.CompletedProcess(argv, 0, output, "")
+
+            with (
+                self.subTest(fault=fault),
+                patch.object(
+                    guest_verify.platform,
+                    "release",
+                    return_value=("wrong" if fault == "kernel" else guest_verify.OPENSUSE_KERNEL),
+                ),
+                patch.object(guest_verify.subprocess, "run", side_effect=native),
+                patch.object(guest_verify.Path, "read_text", side_effect=["1", "[integrity]"]),
+                patch.object(
+                    guest_verify.shutil, "disk_usage", return_value=SimpleNamespace(free=1)
+                ),
+                self.assertRaises(guest_verify.GuestError),
+            ):
+                guest_verify.prepare_opensuse_kernel()
+            self.assertFalse(any(c[0] == "zypper" for c in calls))
+
+    def test_transaction_timeout_and_output_bound(self):
+        self.assertTrue(callable(getattr(guest_verify, "confirm_kernel_transaction", None)))
+        import sys
+
+        for script in ("import time;time.sleep(10)", "print('x' * 1048577)"):
+            with self.subTest(script=script), self.assertRaises(guest_verify.GuestError):
+                guest_verify.confirm_kernel_transaction([sys.executable, "-c", script], timeout=0.1)
+
+
+class TestGuestBoot(unittest.TestCase):
+    def test_reboot_requires_same_boot_before_one_graceful_request(self):
+        self.assertTrue(callable(getattr(guest_verify, "reboot", None)))
+        req = request()
+        req["host"]["profile"] = "opensuse"
+        req["template"]["image"]["release"] = "16.0"
+        req["guest_uuid"] = "12345678-1234-1234-1234-123456789abc"
+        observed = dict(
+            guest_uuid=req["guest_uuid"],
+            os_id="opensuse-leap",
+            release="16.0",
+            architecture="x86_64",
+            hostname=req["host"]["fqdn"].split(".")[0],
+            fqdn=req["host"]["fqdn"],
+            ipv4=[req["host"]["ansible_host"]],
+        )
+        boot = "87654321-1234-1234-1234-123456789abc"
+        with (
+            patch.object(guest_verify.os, "geteuid", return_value=0),
+            patch.object(guest_verify.platform, "system", return_value="Linux"),
+            patch.object(guest_verify, "identity_observation", return_value=observed),
+            patch.object(guest_verify.Path, "read_text", return_value=boot),
+            patch.object(
+                guest_verify.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as run,
+        ):
+            guest_verify.reboot(req, boot)
+            self.assertEqual(run.call_args.args[0], ["systemctl", "--no-block", "reboot"])
+            self.assertEqual(run.call_count, 1)
+            run.reset_mock()
+            for old in (None, "bad", req["guest_uuid"]):
+                with self.subTest(old=old), self.assertRaises(guest_verify.GuestError):
+                    guest_verify.reboot(req, old)
+            self.assertEqual(run.call_count, 0)
+            observed["guest_uuid"] = boot
+            with self.assertRaises(guest_verify.GuestError):
+                guest_verify.reboot(req, boot)
+            self.assertEqual(run.call_count, 0)
+
+    def test_reconnect_rejects_unchanged_or_invalid_boot_without_rebooting(self):
+        req = request()
+        old = "12345678-1234-1234-1234-123456789abd"
+        for value in (old, "bad"):
+            with (
+                self.subTest(value=value),
+                patch.object(guests, "guest_ssh", return_value=["ssh"]),
+                patch.object(
+                    guests.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, value, ""),
+                ) as run,
+                patch.object(guests.time, "monotonic", side_effect=[0, 601]),
+                self.assertRaises(ValueError),
+            ):
+                guests.wait_guest(req, Path("unused"), False, old)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[0][-1], "cat /proc/sys/kernel/random/boot_id")
 
 
 class GuestNativeFixture:
@@ -633,6 +962,41 @@ class TestNativeLifecycle(unittest.TestCase):
         ):
             guest_host.session([self.req], mode)
         return [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_opensuse_ready_requires_two_acks_and_no_native_power_action(self):
+        self.assertTrue(callable(getattr(guest_host, "verify_readiness", None)))
+        guest_host.clone(self.req)
+        self.req["host"]["profile"] = "opensuse"
+        config = self.fixture.guests[1101]["config"]
+        config["description"] = guest_host.marker(self.req, "preparing")
+        ack = {"vmid": 1101, "identity": guest_host.identity(self.req), "verified": True}
+        for fail_at in (0, 1):
+            output = io.StringIO()
+            effects = [ack] * fail_at + [guest_host.GuestError("deadline")]
+            with (
+                patch.object(guest_host, "read_line", side_effect=effects),
+                contextlib.redirect_stdout(output),
+                self.assertRaises(guest_host.GuestError),
+            ):
+                guest_host.verify_readiness(self.req, fresh=True)
+            self.assertTrue(config["description"].endswith(":preparing"))
+            self.assertEqual(
+                sum(
+                    json.loads(line)["phase"] == "reboot" for line in output.getvalue().splitlines()
+                ),
+                fail_at,
+            )
+        self.fixture.calls.clear()
+        output = io.StringIO()
+        with (
+            patch.object(guest_host, "read_line", return_value=ack) as read,
+            contextlib.redirect_stdout(output),
+        ):
+            guest_host.verify_readiness(self.req, fresh=True)
+        self.assertEqual([c.args[0] for c in read.call_args_list], [2500, 2700])
+        self.assertTrue(config["description"].endswith(":ready"))
+        self.assertEqual([c[1] for c in self.fixture.calls if c[0] == "qm"], ["agent", "set"])
+        self.assertIn("--digest", next(c for c in self.fixture.calls if c[:2] == ["qm", "set"]))
 
     def test_clone_configures_guest_vlan_without_changing_source(self):
         initial = copy.deepcopy(self.fixture.template.config)
@@ -1040,3 +1404,121 @@ class TestController(unittest.TestCase):
         for value in (None, "bad", "00000000-0000-0000-0000-000000000000"):
             with self.assertRaises(ValueError):
                 guests.validate_event(req, dict(result, guest_uuid=value), "prepared")
+
+
+class TestRebootExchange(unittest.TestCase):
+    def exercise_exchange(self, fault=None):
+        import sys
+
+        req = request()
+        req["host"]["profile"] = "opensuse"
+        req["template"]["image"]["release"] = "16.0"
+        guest_id = "12345678-1234-1234-1234-123456789abc"
+        old = "12345678-1234-1234-1234-123456789abd"
+        new = "12345678-1234-1234-1234-123456789abe"
+        prepared = dict(
+            vmid=1101,
+            identity=guest_host.identity(req),
+            phase="prepared",
+            fresh=True,
+            guest_uuid=guest_id,
+        )
+        reboot = {k: v for k, v in prepared.items() if k != "fresh"} | {"phase": "reboot"}
+        ready = dict(
+            vmid=1101,
+            identity=guest_host.identity(req),
+            phase="ready",
+            action="created",
+            config_sha256="a" * 64,
+            duration_seconds=1,
+        )
+        if fault == "uuid":
+            reboot["guest_uuid"] = new
+        if fault == "missing":
+            reboot = ready
+        if fault == "repeat":
+            ready = reboot
+        code = (
+            "import sys,json;json.loads(sys.stdin.readline());print("
+            + repr(json.dumps(prepared))
+            + ",flush=True);json.loads(sys.stdin.readline());print("
+            + repr(json.dumps(reboot))
+            + ",flush=True);json.loads(sys.stdin.readline());print("
+            + repr(json.dumps(ready))
+            + ",flush=True)"
+        )
+        boot, effects = old, []
+
+        def ssh(argv, **kwargs):
+            nonlocal boot
+            output = ""
+            if argv[-1] == "cat /proc/sys/kernel/random/boot_id":
+                output = boot
+            elif argv[-1] != "true":
+                envelope = json.loads(kwargs["input"])
+                if "reboot_from" in envelope:
+                    effects.append("reboot")
+                    self.assertEqual(envelope["reboot_from"], old)
+                    boot = new
+                    if fault == "reboot-error":
+                        return subprocess.CompletedProcess(argv, 255, "", "disconnected")
+                    output = json.dumps({"reboot_requested": True})
+                else:
+                    effects.append("prepare" if envelope["fresh"] else "verify")
+                    output = json.dumps(
+                        dict(
+                            guest_uuid=guest_id,
+                            boot_id=old if fault == "post-boot" and not envelope["fresh"] else boot,
+                            os_id="opensuse-leap",
+                            release="16.0",
+                            architecture="x86_64",
+                            hostname=req["host"]["fqdn"].split(".")[0],
+                            fqdn=req["host"]["fqdn"],
+                            ipv4=[req["host"]["ansible_host"]],
+                            cpus=2,
+                            memory_bytes=4 * 1024**3,
+                            crash_reserved_bytes=0,
+                            filesystem_bytes=31 * 1024**3,
+                            security="selinux-enforcing",
+                            kvm_api=12,
+                            kvm_create_vm=True,
+                            packages={
+                                n: "1"
+                                for n in (
+                                    "cloud-init",
+                                    "openssh-server",
+                                    "sudo",
+                                    "qemu-guest-agent",
+                                    "python3-base",
+                                )
+                            }
+                            | {n: "0:" + v for n, v in guest_verify.OPENSUSE_PACKAGES.items()},
+                        )
+                    )
+            return subprocess.CompletedProcess(argv, 0, output, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            pins = Path(directory) / "known_hosts"
+            with (
+                patch.object(guests, "host_ssh", return_value=[sys.executable, "-u", "-c", code]),
+                patch.object(guests.subprocess, "run", side_effect=ssh),
+            ):
+                if fault:
+                    with self.assertRaises(ValueError):
+                        guests.dispatch([req], "apply", pins)
+                    self.assertEqual(
+                        effects.count("reboot"), 0 if fault in {"uuid", "missing"} else 1
+                    )
+                    return
+                outcomes = guests.dispatch([req], "apply", pins)
+        self.assertEqual(effects, ["prepare", "reboot", "verify"])
+        self.assertNotIn("boot_id", outcomes[0])
+        self.assertNotIn("guest_uuid", outcomes[0])
+
+    def test_controller_requires_changed_boot_and_hides_boot_identity(self):
+        self.exercise_exchange()
+
+    def test_failed_or_repeated_reboot_exchange_never_retries(self):
+        for fault in ("uuid", "missing", "repeat", "reboot-error", "post-boot"):
+            with self.subTest(fault=fault):
+                self.exercise_exchange(fault)

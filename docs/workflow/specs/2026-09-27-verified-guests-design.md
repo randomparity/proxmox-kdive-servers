@@ -128,8 +128,54 @@ only missing SSH/sudo/Python/cloud-init/guest-agent prerequisites with native
 package tools, without general upgrade. The pinned images already supply the
 first four; Ubuntu alone lacks the agent. Record actual management package
 versions. Enable/start the guest agent for fresh guests only. Load the installed
-vendor KVM module and persist its name for boot; missing modules fail rather than
-installing a kernel or falling back to TCG. Preserve existing security enforcement.
+vendor KVM module and persist its name for boot. Missing modules fail, except for
+the explicitly approved pinned openSUSE prerequisite below. Never fall back to
+TCG or weaken existing security enforcement.
+
+### Pinned openSUSE kernel prerequisite
+
+The operator approved replacing `kernel-default-base`
+`6.12.0-160000.38.1.160000.2.24` with `kernel-default` `6.12.0-160000.38.1`
+and `ucode-intel` `20260812-160000.1.1`, all x86_64, only during fresh preparation.
+The pinned minimal image lacks KVM modules; the full package contains signed
+modules with matching vermagic and an identical kernel binary. This exception
+includes normal vendor package scriptlets and one graceful guest reboot, not a
+general upgrade or a template/image change. Record both prerequisite versions.
+
+Admit the exact running kernel/base package, enforcing security and sufficient
+guest free space before downloading. Use the configured vendor repository with
+metadata signature checking and native downloads into private temporary storage.
+Check both downloaded RPM identities and signatures. The actual native install
+process must present exactly two pinned installs and the pinned base removal;
+validate its XML solver summary before answering its one confirmation prompt.
+Reject extra/different packages, action types, trust prompts, repeated prompts,
+malformed or oversized output, errors and timeouts. Do not trust an earlier dry-run
+as authority for a later unchecked transaction. Verify the resulting package set,
+kernel build/binary and preserved security before accepting preparation.
+
+Extend the existing readiness exchange with one internal reboot phase only for a
+fresh openSUSE guest. After authenticated preparation and baseline verification,
+the native session rechecks owned preparing configuration and permits the single
+reboot phase while retaining its locks. The controller strictly authenticates the
+guest, rechecks its native-bound UUID and previous boot ID, and issues exactly one
+`systemctl --no-block reboot` request. No force/reset option or retry is used.
+This avoids native reboot operations that can apply pending VM configuration.
+An ambiguous reboot response stops for inspection rather than repeating it.
+
+Reconnect with the existing SSH pin, require the same UUID and a different valid
+boot ID, and run the full common verifier with preparation disabled. Only its
+correlated acknowledgement allows ready marking. Boot identity remains private.
+Ready reruns and all other profiles never enter this reboot phase. A second or
+unexpected reboot event is rejected, and failure retains the owned partial.
+
+The first native acknowledgement allows 2500 seconds: SSH readiness at most 600,
+guest preparation/verification at most 1800, plus transport margin. The second
+allows 2700: reboot request at most 60, strict changed-boot reconnect at most 600,
+read-only verification at most 1800, plus margin. Native event reads remain bounded
+at 2400 seconds; no single native reboot task is introduced. Guest package downloads
+and interactive installation have their own bounded time/output budgets inside
+the overall 1800-second preparation envelope. Expiry never initiates another reboot
+or readiness promotion.
 
 Verify distro ID/release and x86_64, short hostname and FQDN, selected static IPv4,
 successful cloud-init, authenticated account with noninteractive sudo, exact CPU
@@ -137,7 +183,7 @@ count, accounted memory at least 90% of configured MiB, and root filesystem capa
 least configured disk bytes minus max(2 GiB, 10%). Native disks must separately
 match configured size. Require active guest agent and native ping; SELinux
 enforcing on Fedora/Rocky/openSUSE, enabled AppArmor with enforcing profiles on
-Ubuntu. Existing image packages/modules must support these checks unchanged.
+Ubuntu. The approved openSUSE prerequisite is the only kernel package exception.
 
 Report usable `/proc/meminfo` MemTotal as `memory_bytes`, separately from the
 measured `/sys/kernel/kexec_crash_size` reservation as `crash_reserved_bytes`.
