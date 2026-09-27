@@ -236,6 +236,52 @@ def cached_image(image):
         path.unlink(missing_ok=True)
 
 
+def lvm_extent(request):
+    config = native(f"/storage/{request['storage']}")
+    check(
+        isinstance(config, dict)
+        and config.get("type") == "lvmthin"
+        and isinstance(config.get("vgname"), str)
+        and re.fullmatch(r"[A-Za-z0-9_+][A-Za-z0-9_.+-]{0,127}", config["vgname"]),
+        "Invalid LVM storage geometry configuration",
+    )
+    try:
+        report = json.loads(
+            command(
+                [
+                    "vgs",
+                    "--reportformat",
+                    "json",
+                    "--units",
+                    "b",
+                    "--nosuffix",
+                    "--options",
+                    "vg_name,vg_extent_size",
+                    "--",
+                    config["vgname"],
+                ]
+            )
+        )["report"]
+        check(len(report) == 1 and len(report[0]["vg"]) == 1, "Ambiguous LVM extent")
+        row = report[0]["vg"][0]
+        value = row["vg_extent_size"]
+        check(
+            row["vg_name"] == config["vgname"]
+            and isinstance(value, str)
+            and re.fullmatch(r"[0-9]+(?:\.0+)?", value),
+            "Invalid LVM extent response",
+        )
+        extent = int(value.partition(".")[0])
+        check(extent >= 512 and extent & (extent - 1) == 0, "Invalid LVM extent size")
+        return extent
+    except (ValueError, KeyError, TypeError):
+        raise TemplateError("Cannot verify LVM extent; inspect native vgs output") from None
+
+
+def allocated_size(size, extent):
+    return (size + extent - 1) // extent * extent if extent else size
+
+
 def host_admission(request):
     check(
         os.geteuid() == 0 and platform.system() == "Linux" and platform.machine() == "x86_64",
@@ -267,6 +313,7 @@ def host_admission(request):
         and "images" in str(storage.get("content", "")).split(","),
         "Storage must be active image-capable zfspool or lvmthin",
     )
+    storage["extent_bytes"] = lvm_extent(request) if storage["type"] == "lvmthin" else 0
     bridges = native(f"{path}/network")
     check(
         isinstance(bridges, list) and all(isinstance(row, dict) for row in bridges),
@@ -319,7 +366,7 @@ def properties(value):
     return result
 
 
-def verify_configuration(request, marker):
+def verify_configuration(request, marker, extent):
     base = f"/nodes/{request['node']}/qemu/{request['template_vmid']}"
     config = native(base + "/config")
     status = native(base + "/status/current")
@@ -365,7 +412,7 @@ def verify_configuration(request, marker):
         and (request["vlan"] is None or net.get("tag") == str(request["vlan"])),
         "Template network differs; select a new ID",
     )
-    verify_disks(request, config)
+    verify_disks(request, config, extent)
     feature = "clone" if config.get("template") == 1 else "snapshot"
     capability = native(base + "/feature", "--feature", feature)
     check(
@@ -375,7 +422,7 @@ def verify_configuration(request, marker):
     return config
 
 
-def verify_disks(request, config):
+def verify_disks(request, config, extent):
     volumes = native(f"/nodes/{request['node']}/storage/{request['storage']}/content")
     check(
         isinstance(volumes, list) and all(isinstance(row, dict) for row in volumes),
@@ -423,9 +470,15 @@ def verify_disks(request, config):
         )
         size = matches[0].get("size")
         minimum = request["image"]["virtual_size_bytes"] if slot == "scsi0" else 1
-        maximum = minimum + 1024**2 if slot == "scsi0" else 8 * 1024**2
+        maximum = (
+            allocated_size(minimum, extent)
+            if slot == "scsi0"
+            else allocated_size(8 * 1024**2, extent)
+        )
+        if slot == "scsi0" and not extent:
+            maximum += 1024**2
         check(
-            type(size) is int and minimum <= size <= maximum,
+            type(size) is int and minimum <= size <= maximum and (not extent or size % extent == 0),
             "Template disk allocation size differs",
         )
     check(
@@ -454,25 +507,28 @@ def create(request, marker, image):
 
 def lifecycle(request, storage, template_identity):
     marker = "kdive-template-v1:" + template_identity + ":"
+    extent = storage["extent_bytes"]
     exists = existing_resource(request)
     if exists:
         config = native(f"/nodes/{request['node']}/qemu/{request['template_vmid']}/config")
         check(isinstance(config, dict), "Invalid existing template configuration")
         if config.get("description") == marker + "ready":
-            config = verify_configuration(request, marker + "ready")
+            config = verify_configuration(request, marker + "ready", extent)
             check(config.get("template") == 1, "Ready object is not a template; inspect state")
             return "preserved", config
         check(
             request["resume"] and config.get("description") == marker + "creating",
             "ID occupied or interrupted; inspect ownership before explicit resume",
         )
-        config = verify_configuration(request, marker + "creating")
+        config = verify_configuration(request, marker + "creating", extent)
     else:
         check(not request["resume"], "Resume requires an existing owned template")
         available = storage.get("avail")
         check(
             type(available) is int
-            and available >= request["image"]["virtual_size_bytes"] + 16 * 1024**2,
+            and available
+            >= allocated_size(request["image"]["virtual_size_bytes"], extent)
+            + 2 * allocated_size(8 * 1024**2, extent),
             "Insufficient reported storage space for template disks",
         )
         if not request["apply"]:
@@ -481,12 +537,12 @@ def lifecycle(request, storage, template_identity):
         # Recheck after download; qm also enforces cluster-wide allocation exclusivity.
         check(not existing_resource(request), "Template ID became occupied; select a new ID")
         create(request, marker + "creating", image)
-        config = verify_configuration(request, marker + "creating")
+        config = verify_configuration(request, marker + "creating", extent)
     if config.get("template") != 1:
         command(["qm", "template", str(request["template_vmid"])], timeout=600)
-    verify_configuration(request, marker + "creating")
+    verify_configuration(request, marker + "creating", extent)
     command(["qm", "set", str(request["template_vmid"]), "--description", marker + "ready"])
-    config = verify_configuration(request, marker + "ready")
+    config = verify_configuration(request, marker + "ready", extent)
     check(config.get("template") == 1, "Template conversion did not persist")
     return "resumed" if exists else "created", config
 

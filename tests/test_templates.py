@@ -46,6 +46,7 @@ class NativeFixture:
         }
         self.bridge = {"iface": "vmbr0", "active": 1, "type": "bridge", "bridge_ports": "eno1"}
         self.volumes = []
+        self.extent = 4 * 1024**2
         self.calls = []
         self.image_info = {
             "format": "qcow2",
@@ -54,10 +55,20 @@ class NativeFixture:
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
+        if argv[0] == "vgs":
+            return json.dumps(
+                {
+                    "report": [
+                        {"vg": [{"vg_name": "vg-example", "vg_extent_size": str(self.extent)}]}
+                    ]
+                }
+            )
         if argv[0] == "qemu-img":
             return json.dumps(self.image_info)
         if argv[0] == "pvesh":
             path = argv[2]
+            if path == "/storage/pool":
+                return '{"type":"lvmthin","vgname":"vg-example"}'
             if path == "/cluster/status":
                 return json.dumps([{"type": "node", "local": 1, "name": self.node}])
             if path == "/cluster/resources":
@@ -109,6 +120,9 @@ class NativeFixture:
                         else 4 * 1024**2,
                     }
                 )
+                if self.storage["type"] == "lvmthin":
+                    size = self.volumes[-1]["size"]
+                    self.volumes[-1]["size"] = (size + self.extent - 1) // self.extent * self.extent
             return ""
         if argv[:2] == ["qm", "template"]:
             self.config["template"] = 1
@@ -202,6 +216,71 @@ class TestLifecycle(unittest.TestCase):
         )
         with self.assertRaisesRegex(self.host.TemplateError, "certificate"):
             self.host.run(self.request)
+
+    def test_lvmthin_extent_rounding_survives_lifecycle(self):
+        size = json.loads((ROOT / "vars/images.json").read_text())["opensuse"]["virtual_size_bytes"]
+        self.request["profile"] = "opensuse"
+        self.request["image"]["virtual_size_bytes"] = size
+        self.native.image_info["virtual-size"] = size
+        self.native.storage["type"] = "lvmthin"
+        try:
+            result = self.host.run(self.request)
+        except self.host.TemplateError as error:
+            self.fail(f"Valid extent-rounded allocation was rejected: {error}")
+        self.assertEqual(result["action"], "created")
+        self.assertEqual(self.native.volumes[0]["size"], 1456 * 1024**2)
+        self.assertEqual(self.host.run(self.request)["action"], "preserved")
+        self.native.config["description"] = self.native.config["description"].replace(
+            "ready", "creating"
+        )
+        self.request["resume"] = True
+        self.assertEqual(self.host.run(self.request)["action"], "resumed")
+        self.native.volumes[0]["size"] += self.native.extent
+        with self.assertRaisesRegex(self.host.TemplateError, "allocation size"):
+            self.host.run(self.request)
+
+    def test_lvmthin_bad_extent_fails_before_allocation(self):
+        self.native.storage["type"] = "lvmthin"
+        for extent in (0, -1, "4.5", "unknown", 3000):
+            with self.subTest(extent=extent):
+                self.native.extent = extent
+                with self.assertRaisesRegex(self.host.TemplateError, "extent"):
+                    self.host.run(self.request)
+                self.assertIsNone(self.native.config)
+                self.assertFalse(any(c[0] == "qm" for c in self.native.calls))
+
+    def test_lvmthin_invalid_geometry_response_fails_closed(self):
+        from unittest.mock import patch
+
+        self.native.storage["type"] = "lvmthin"
+        for response in (
+            "invalid JSON",
+            "{}",
+            '{"report":[]}',
+            '{"report":[{"vg":[{"vg_name":"wrong","vg_extent_size":"4194304"}]}]}',
+        ):
+            with self.subTest(response=response):
+                with patch.object(
+                    self.host,
+                    "command",
+                    side_effect=lambda argv, response=response, **kwargs: (
+                        response if argv[0] == "vgs" else self.native(argv, **kwargs)
+                    ),
+                ):
+                    with self.assertRaisesRegex(self.host.TemplateError, "extent"):
+                        self.host.run(self.request)
+                self.assertIsNone(self.native.config)
+
+    def test_lvmthin_admission_reserves_rounded_auxiliary_disks(self):
+        self.native.storage["type"] = "lvmthin"
+        self.native.extent = 16 * 1024**2
+        self.native.storage["avail"] = self.request["image"]["virtual_size_bytes"] + 16 * 1024**2
+        with self.assertRaisesRegex(self.host.TemplateError, "space"):
+            self.host.run(self.request)
+        self.assertIsNone(self.native.config)
+        self.native.storage["avail"] += 16 * 1024**2
+        self.assertEqual(self.host.run(self.request)["action"], "created")
+        self.assertEqual(self.host.run(self.request)["action"], "preserved")
 
     def test_plan_never_writes_and_node_mismatch(self):
         self.request["apply"] = False

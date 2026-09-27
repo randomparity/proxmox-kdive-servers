@@ -129,6 +129,10 @@ space for each image's virtual size plus 16 MiB for auxiliary disks, as well as 
 2.1 GB under `/var/cache/kdive-templates` for all four compressed sources. A tagged NIC
 requires a VLAN-aware bridge or the native conventional-bridge VLAN uplink support.
 The operator owns bridge/uplink configuration and external DHCP/DNS administration.
+For LVM-thin storage, the native `vgs` command must expose the selected volume group's
+extent size. Admission rounds the root and auxiliary reservations to that geometry;
+disk readback accepts only bounded, extent-aligned allocations. ZFS retains its native
+allocation checks. An unavailable or malformed extent report fails before allocation.
 
 Assign explicit unused template IDs and CPU `host`. Template validation permits
 unassigned guest `vmid`, `ansible_host`, `ipv4_cidr`, `gateway` and `dns_servers`;
