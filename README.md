@@ -221,6 +221,8 @@ subsequent access use strict verification. This assumes trustworthy first contac
 Stored keys are never removed/replaced: a mismatch requires operator inspection.
 Private keys remain on the controller. Optional `ansible_ssh_private_key_file`
 selects the guest identity; otherwise ordinary OpenSSH identities apply.
+Inventory paths may contain spaces. Literal `${`, line breaks and NUL are rejected
+before allocation to prevent OpenSSH from reinterpreting the pin location.
 
 ```sh
 # Export API credentials as described above, then inspect the read-only plan:

@@ -463,6 +463,73 @@ class TestNativeLifecycle(unittest.TestCase):
 
 
 class TestController(unittest.TestCase):
+    def test_ssh_pin_path_is_one_literal_native_filename(self):
+        path = Path('/tmp/private%p inventory "quoted"/known_hosts')
+        for fresh in (True, False):
+            argv = guests.guest_ssh(request()["host"], path, fresh)
+            option = next(value for value in argv if value.startswith("UserKnownHostsFile="))
+            result = subprocess.run(
+                [
+                    "ssh",
+                    "-vvv",
+                    "-F",
+                    "/dev/null",
+                    "-o",
+                    "IdentityFile=none",
+                    "-o",
+                    "ProxyCommand=false",
+                    "-o",
+                    option,
+                    "192.0.2.11",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 255)
+            expanded = [
+                line for line in result.stderr.splitlines() if "expanded UserKnownHostsFile" in line
+            ]
+            self.assertEqual(len(expanded), 1)
+            self.assertTrue(expanded[0].endswith(" -> '" + str(path) + "'"), expanded)
+        path = path.parent / "back\\slash" / "known_hosts"
+        result = subprocess.run(
+            ["ssh", "-G", "-F", "/dev/null", "-o", guests.known_hosts_option(path), "192.0.2.11"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        self.assertIn("userknownhostsfile " + str(path), result.stdout.splitlines())
+
+    def test_ssh_pin_path_rejects_expansion_before_native_dispatch(self):
+        for value in ("/private/${HOME}/known_hosts", "/private/line\nfeed/known_hosts"):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                guests.guest_ssh(request()["host"], Path(value), fresh=True)
+        data = load_inventory(ROOT / "inventory/example.yml")
+        with (
+            patch.object(guests, "load_inventory", return_value=data),
+            patch.object(
+                guests.sys,
+                "argv",
+                [
+                    "guests.py",
+                    "--inventory",
+                    "/private/${HOME}/inventory.yml",
+                    "--targets",
+                    "ubuntu_local",
+                    "--apply",
+                ],
+            ),
+            patch.object(guests.templates, "api_admission") as admission,
+            patch.object(guests, "dispatch") as dispatch,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(guests.main(), 1)
+            admission.assert_not_called()
+            dispatch.assert_not_called()
+
     def test_partial_event_cannot_block_past_read_deadline(self):
         reader, writer = os.pipe()
         stream = os.fdopen(reader, "rb", buffering=0)

@@ -92,6 +92,17 @@ def prepare_known_hosts(path, fresh):
         ) from None
 
 
+def known_hosts_option(path):
+    value = str(path)
+    require(
+        path.is_absolute() and "${" not in value and not any(c in value for c in "\r\n\0"),
+        "SSH pins",
+        "use an absolute inventory path without environment expansion, line breaks or NUL",
+    )
+    value = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return 'UserKnownHostsFile="' + value + '"'
+
+
 def guest_ssh(host, known_hosts, fresh):
     argv = [
         "ssh",
@@ -102,7 +113,7 @@ def guest_ssh(host, known_hosts, fresh):
         "-o",
         "StrictHostKeyChecking=" + ("accept-new" if fresh else "yes"),
         "-o",
-        "UserKnownHostsFile=" + str(known_hosts),
+        known_hosts_option(known_hosts),
         "-o",
         "GlobalKnownHostsFile=/dev/null",
         "-o",
@@ -389,6 +400,8 @@ def main():
         data = load_inventory(args.inventory)
         validate_inventory(data, args.targets)
         hosts = managed_hosts(data)
+        pins = Path(args.inventory).absolute().parent / "known_hosts"
+        known_hosts_option(pins)
         revision = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip()
@@ -407,7 +420,6 @@ def main():
                 )
             )
             groups.setdefault(key, []).append(request_for(host, revision))
-        pins = Path(args.inventory).absolute().parent / "known_hosts"
         mode = "verify" if args.verify else "apply" if args.apply else "plan"
         # Admit every selected host before the first mutating batch; each apply rechecks under lock.
         if mode == "apply":
