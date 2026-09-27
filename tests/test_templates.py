@@ -533,6 +533,28 @@ class TestController(unittest.TestCase):
         self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
         self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
 
+    def test_guest_admission_reads_selected_source_configuration(self):
+        import io
+        import os
+        from unittest.mock import patch
+
+        source = {"template": 1, "net0": "virtio=02:11:22:33:44:55,bridge=vmbr0,tag=30"}
+        data = [
+            {"cpuinfo": {"cpus": 8}, "memory": {"total": 1024}},
+            {"active": 1, "enabled": 1, "type": "zfspool", "content": "images"},
+            source,
+        ]
+        env = {self.host[key]: "credential" for key in self.controller.CREDENTIAL_REFS}
+        with (
+            patch.dict(os.environ, env),
+            patch(
+                "urllib.request.OpenerDirector.open",
+                side_effect=[io.BytesIO(json.dumps({"data": x}).encode()) for x in data],
+            ) as open_api,
+        ):
+            self.assertEqual(self.controller.api_admission(self.host, source=True), source)
+        self.assertTrue(open_api.call_args.args[0].full_url.endswith("/qemu/9000/config"))
+
     def test_api_ssh_failures_are_fatal(self):
         import os
         import subprocess

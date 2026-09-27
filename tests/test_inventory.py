@@ -32,6 +32,18 @@ class TestValidation(unittest.TestCase):
         self.host["profile"] = "fedora"
         self.assertEqual(validate_inventory(self.data), 4)
 
+    def test_shared_template_allows_independent_guest_vlan_only(self):
+        other = self.data["_meta"]["hostvars"]["fedora_remote"]
+        other.update(
+            profile=self.host["profile"], template_vmid=self.host["template_vmid"], vlan=25
+        )
+        self.assertEqual(validate_inventory(self.data), 4)
+        with self.assertRaises(ValidationError):
+            validate_inventory(self.data, purpose="templates")
+        other["bridge"] = "vmbr1"
+        with self.assertRaises(ValidationError):
+            validate_inventory(self.data)
+
     def test_invalid_field_types_and_values(self):
         cases = {
             "profile": [None, "unknown", True, "{{ lookup('env', 'SECRET') }}"],
@@ -162,6 +174,32 @@ class TestValidation(unittest.TestCase):
             self.host["ssh_public_keys"] = [broken]
             with self.assertRaises(ValidationError):
                 validate_inventory(self.data)
+
+    def test_guest_dns_identity(self):
+        original = self.host.get("fqdn")
+        for value in [
+            None,
+            "short",
+            "UPPER.example.invalid",
+            "a..invalid",
+            "-a.example",
+            "a.example.",
+            "a_b.example",
+            "a" * 64 + ".example",
+            "1.2.3.4",
+        ]:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                self.host["fqdn"] = value
+                validate_inventory(self.data)
+        self.host["fqdn"] = original
+        self.data["_meta"]["hostvars"]["rocky_local"]["fqdn"] = original
+        with self.assertRaisesRegex(ValidationError, "unique"):
+            validate_inventory(self.data, "fedora_remote")
+
+    def test_guest_validation_checks_template_collisions(self):
+        self.host["vmid"] = self.data["_meta"]["hostvars"]["rocky_local"]["template_vmid"]
+        with self.assertRaisesRegex(ValidationError, "collide"):
+            validate_inventory(self.data, "fedora_remote")
 
 
 class TestTemplateValidation(unittest.TestCase):

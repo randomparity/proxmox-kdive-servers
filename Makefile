@@ -12,7 +12,7 @@ ifneq ($(origin TARGETS), undefined)
 export TARGETS
 endif
 
-.PHONY: setup hooks lint syntax validate templates test check
+.PHONY: setup hooks lint syntax validate templates provision verify test check
 
 setup:
 	uv sync --locked
@@ -28,6 +28,8 @@ lint:
 syntax:
 	.venv/bin/ansible-playbook -i localhost, playbooks/validate.yml --syntax-check
 	.venv/bin/ansible-playbook -i localhost, playbooks/templates.yml --syntax-check
+	.venv/bin/ansible-playbook -i localhost, playbooks/provision.yml --syntax-check
+	.venv/bin/ansible-playbook -i localhost, playbooks/verify.yml --syntax-check
 
 validate:
 	.venv/bin/python scripts/validate_inventory.py
@@ -35,6 +37,12 @@ validate:
 
 templates:
 	.venv/bin/python scripts/templates.py
+
+provision:
+	.venv/bin/python scripts/guests.py
+
+verify:
+	.venv/bin/python scripts/guests.py --verify
 
 test:
 	.venv/bin/python -m unittest discover -s tests -v

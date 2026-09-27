@@ -2,8 +2,9 @@
 
 This repository prepares clean Linux VMs for
 [KDIVE validation](https://github.com/randomparity/kdive/issues/2803).
-It provides offline inventory checks and verified, unbooted Proxmox templates for
-four Linux families. Guest provisioning, snapshots and KDIVE installation follow separately.
+It provides offline inventory checks, verified Proxmox templates, and full-clone
+guests with a verified nested-KVM baseline for four Linux families. Snapshot lifecycle
+and KDIVE installation follow separately.
 
 ## Controller setup
 
@@ -72,6 +73,7 @@ Other groups may coexist, but these checks only validate managed `kdive` hosts.
 | --- | --- |
 | `profile` | `ubuntu`, `fedora`, `rocky`, or `opensuse` |
 | `vmid` | Explicit integer 100–999999999, unique throughout `kdive` |
+| `fqdn` | Unique lowercase fully qualified guest DNS name, separate from SSH IPv4 |
 | `proxmox_api_host`, `proxmox_api_port` | Hostname/IP without URL scheme; port 1–65535, default 8006 |
 | `proxmox_node`, `storage`, `bridge` | Literal identifiers; existence is checked later against the lab |
 | `api_user_env`, `api_token_id_env`, `api_token_secret_env` | Distinct uppercase environment-variable names, not credentials |
@@ -79,7 +81,7 @@ Other groups may coexist, but these checks only validate managed `kdive` hosts.
 | `gateway`, `dns_servers` | Different usable gateway in the subnet; non-empty IPv4 DNS list |
 | `ansible_user`, `ssh_public_keys` | Guest account and non-empty OpenSSH public-key list (Ed25519/RSA/NIST ECDSA) |
 | `cores`, `memory_mib`, `disk_gib` | Positive integer sizing, at most 2147483647; no Boolean/string coercion |
-| `vlan` | Optional integer 1–4094; propagated to the template NIC |
+| `vlan` | Optional integer 1–4094; desired guest NIC tag for provisioning, template NIC tag for template operations |
 | `template_vmid`, `cpu` | Explicit template ID 100–999999999 and literal `host` CPU |
 | `proxmox_ssh_host`, `proxmox_ssh_user`, `proxmox_ssh_port` | Native host SSH endpoint, root-capable login, port default 22 |
 | `proxmox_ssh_private_key_file` | Optional private-key path; blank/omitted uses normal SSH identities |
@@ -198,11 +200,137 @@ Management package versions and absences are recorded separately. In particular,
 the Ubuntu source lacks `qemu-guest-agent`; downstream preparation owns installing it.
 No security enforcement or package state is changed to manufacture import success.
 
-Import/rerun proof establishes template identity and storage eligibility. It does not
-establish guest boot, usable networking, cloud-init execution or nested KVM.
-[Issue #4](https://github.com/randomparity/proxmox-kdive-servers/issues/4) owns cloning,
-sizing, capacity, management prerequisites and authenticated guest readiness.
+Import/rerun proof establishes template identity and storage eligibility. Guest
+provisioning below establishes boot, networking, cloud-init and nested KVM.
 [Issue #5](https://github.com/randomparity/proxmox-kdive-servers/issues/5) owns clean
 snapshots, restore, test-use coordination and scoped teardown, consuming this identity.
 KDIVE owns installation, libvirt/build/debug tools, runners, workload qualification
 and external test state. The operator owns host module/reboot and network changes.
+
+## Verified guests
+
+Complete guest inputs, including each unique `fqdn`, before provisioning. The
+short first DNS label becomes the guest hostname; the remainder becomes its DNS
+search domain. For example, `ubuntu-local.example.invalid` identifies a guest
+independently of its static `ansible_host`. External DNS records remain operator
+owned. Guest validation also checks template inputs and guest/template ID collisions.
+
+Guest provisioning reads the selected source's original VLAN through the authenticated
+API and revalidates its exact immutable identity and configuration through native SSH.
+The guest's requested VLAN is bound separately and applied while preserving the cloned
+NIC's MAC address. Tagged and untagged guests can share a source template without
+changing that template. The API token therefore needs selected-template configuration
+audit access as well as node/storage visibility. Template-only operations still use
+their supplied VLAN as an immutable template input; retain the original template inputs
+when operating that lifecycle.
+
+Keep the private inventory directory mode 0700. Provisioning creates its
+`known_hosts` file mode 0600 for guest SSH pins. Fresh owned clones use OpenSSH
+`accept-new` once on the operator-trusted lab network; privileged preparation and
+subsequent access use strict verification. This assumes trustworthy first contact.
+Stored keys are never removed/replaced: a mismatch requires operator inspection.
+
+Cloud-init must finish with no errors. One exact compatibility advisory is accepted:
+Proxmox 9.2 generates a scalar `user` value, which cloud-init deprecates until its
+scheduled removal in 27.2. Status must be `done`; every recoverable notice must be
+that advisory. All other notices and failures are rejected. This explains the
+documented [cloud-init exit code 2](https://docs.cloud-init.io/en/latest/explanation/return_codes.html)
+seen with the pinned Fedora image; it does not change the host generator or suppress
+guest logging. Template/host lifecycle owners must address the format before removal.
+Private keys remain on the controller. Optional `ansible_ssh_private_key_file`
+selects the guest identity; otherwise ordinary OpenSSH identities apply.
+Inventory paths may contain spaces. Literal `${`, line breaks and NUL are rejected
+before allocation to prevent OpenSSH from reinterpreting the pin location.
+
+```sh
+# Export API credentials as described above, then inspect the read-only plan:
+make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+# Create only the selected absent, owned full clone and verify its baseline:
+make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local APPLY=1
+# Reusable read-only verification, including after a separately managed restore:
+make verify INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+```
+
+Use comma-separated exact aliases for multiple instances. All selected batches
+are planned before an apply; admission repeats under the native allocation lock.
+New cores plus rounded-up maximum of observed busy CPUs and one-minute load must
+fit host logical CPUs. New RAM must fit `MemAvailable`; full root/auxiliary disks
+must fit reported storage. These are observed admission checks, not dedicated-core
+reservations: the operator controls concurrent workloads. Missing capacity,
+nesting, source ownership or native evidence fails before allocation. The host is
+never reconfigured or rebooted, and there is no TCG fallback.
+
+Native cooperating locks serialize allocations and selected VM/template operations
+through readiness. Full clones receive exact hardware/static networking, optional
+VLAN, keys, `host` CPU, guest agent, no ballooning, no automatic startup and no
+general cloud-init package upgrade. Root filesystem growth is verified after boot.
+Before first start, provisioning replaces only the clone's generated IDE cloud-init
+seed with a generated `scsi1` seed on its VirtIO SCSI controller. Native removal
+frees the old seed volume; creation regenerates it from inventory. Root and EFI
+volumes, VM UUID and source templates are preserved and checked. Failure leaves
+an inspectable partial; reruns do not resume or repair it.
+Only fresh clones receive management preparation: the pinned Ubuntu image needs
+`qemu-guest-agent`; the other three already contain it. Existing SSH/sudo/Python/
+cloud-init are checked. The installed guest KVM vendor module is loaded and named
+in `/etc/modules-load.d/kdive-kvm.conf` for reboot readiness.
+The pinned openSUSE Minimal-VM image contains `kernel-default-base` without KVM
+modules. Fresh openSUSE provisioning replaces that exact base package
+`6.12.0-160000.38.1.160000.2.24` with signed `kernel-default 6.12.0-160000.38.1`
+and `ucode-intel 20260812-160000.1.1`. It verifies the two RPM identities/signatures
+and the actual native transaction before its sole confirmation. No other package
+action is accepted. Normal vendor RPM scriptlets update guest boot artifacts;
+the running kernel build and kernel binary must remain unchanged. SELinux and
+integrity lockdown stay enforced. Other missing vendor KVM modules fail.
+After initial verification, fresh openSUSE receives one graceful authenticated
+`systemctl --no-block reboot` request. Strict reconnect must prove the same VM
+UUID, changed boot identity and full baseline again before ready marking. A
+failure retains the partial. An empty SSH disconnect during the one reboot request
+requires the same strict post-boot proof; invalid responses stop for inspection.
+There is no forced power fallback, reboot retry or automatic recovery. Ready reruns remain read-only.
+No libvirt, KDIVE, build/debug tooling or runners are installed.
+
+Verification checks successful cloud-init, authenticated SSH/noninteractive sudo,
+actual OS/release/x86_64, hostname/FQDN/static IPv4, CPU/RAM/root filesystem, active
+guest agent plus native ping, and enforcing SELinux or AppArmor. It opens the KVM
+API as root, requires version 12 and creates/closes a transient VM descriptor.
+This proves capability; KDIVE owns later virtualization permissions and workloads.
+Before any guest preparation, read-only checks match the guest DMI UUID to the
+owned VM's native SMBIOS UUID and verify its OS and network identity. A stale IP
+cannot authorize preparation merely by accepting the configured SSH credential.
+The UUID and boot identity travel privately and are excluded from public evidence.
+RAM evidence reports usable `memory_bytes` and measured `crash_reserved_bytes`
+separately. Allocation proof requires their sum to be at least 90% of configured
+RAM, without changing the image's crash-kernel settings. Only the native sysfs
+reservation counts, capped at 512 MiB and one quarter of configured RAM; their
+sum cannot exceed configured RAM. Missing crash-reservation support counts as
+zero; malformed or unreadable evidence fails.
+
+Matching ready reruns perform verification only: they do not restart a stopped
+guest, update packages/keys, resize disks or clear test state. Drift, extra disks,
+pending native changes, foreign ownership and preparing-phase objects fail for
+inspection. Failed work retains inspectable resources; there is no automatic
+delete, resume, repair or recreate command. Ready does not mean test state is clean.
+Issue #5 owns clean snapshots and restoration without blessing a used VM as clean.
+
+The equivalent Ansible entrypoints use the same controller operation:
+
+```sh
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+  .venv/bin/ansible-playbook -i localhost, playbooks/provision.yml
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+  .venv/bin/ansible-playbook -i localhost, playbooks/verify.yml
+```
+
+Add `APPLY=1` only for provisioning. Keep `-i localhost,`; private parsing and task
+output remain protected. Make emits sanitized identities, observed baseline and
+duration JSON without account names, endpoints, addresses or keys.
+
+For KDIVE handoff, supply the private ordinary inventory and guest `known_hosts`
+through a private channel. Point its SSH/Ansible `UserKnownHostsFile` at that file;
+keep host-key checking enabled, use its normal guest account/identity and guest
+Python rather than the controller virtualenv. Assign one exclusive test consumer
+per VM. The consumer must release the VM before provisioning verification or later
+restore/teardown, and collect external test results/artifacts before release.
+Coordinate this explicitly; this repository does not supply a scheduler. Keep
+private inventory and SSH pins after worktree cleanup because they identify access
+to persistent VMs. Sanitized reports may be shared; raw native/guest logs may not.
