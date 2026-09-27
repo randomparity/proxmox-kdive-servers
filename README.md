@@ -283,6 +283,12 @@ Before any guest preparation, read-only checks match the guest DMI UUID to the
 owned VM's native SMBIOS UUID and verify its OS and network identity. A stale IP
 cannot authorize preparation merely by accepting the configured SSH credential.
 The UUID travels privately and is excluded from public evidence.
+RAM evidence reports usable `memory_bytes` and measured `crash_reserved_bytes`
+separately. Allocation proof requires their sum to be at least 90% of configured
+RAM, without changing the image's crash-kernel settings. Only the native sysfs
+reservation counts, capped at 512 MiB and one quarter of configured RAM; their
+sum cannot exceed configured RAM. Missing crash-reservation support counts as
+zero; malformed or unreadable evidence fails.
 
 Matching ready reruns perform verification only: they do not restart a stopped
 guest, update packages/keys, resize disks or clear test state. Drift, extra disks,

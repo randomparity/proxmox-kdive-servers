@@ -228,6 +228,7 @@ def verify_guest(request, known_hosts, fresh, guest_uuid):
             "architecture",
             "cpus",
             "memory_bytes",
+            "crash_reserved_bytes",
             "filesystem_bytes",
             "security",
             "kvm_api",

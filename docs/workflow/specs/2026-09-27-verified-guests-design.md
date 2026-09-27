@@ -133,11 +133,23 @@ installing a kernel or falling back to TCG. Preserve existing security enforceme
 
 Verify distro ID/release and x86_64, short hostname and FQDN, selected static IPv4,
 successful cloud-init, authenticated account with noninteractive sudo, exact CPU
-count, memory at least 90% of configured MiB, and root filesystem capacity at
+count, accounted memory at least 90% of configured MiB, and root filesystem capacity at
 least configured disk bytes minus max(2 GiB, 10%). Native disks must separately
 match configured size. Require active guest agent and native ping; SELinux
 enforcing on Fedora/Rocky/openSUSE, enabled AppArmor with enforcing profiles on
 Ubuntu. Existing image packages/modules must support these checks unchanged.
+
+Report usable `/proc/meminfo` MemTotal as `memory_bytes`, separately from the
+measured `/sys/kernel/kexec_crash_size` reservation as `crash_reserved_bytes`.
+Only their sum is used for allocation proof. The pinned Rocky kernel reserves
+256 MiB at 4 GiB, which MemTotal excludes. Its installed default range tops out
+at 512 MiB; cap accepted reservation there and at one quarter of configured RAM
+so small guests cannot compensate for missing memory with an excessive reserve.
+Both measurements must be nonnegative integers (usable RAM positive) and their
+sum cannot exceed configured RAM. Missing sysfs support means zero reservation;
+other read failures or malformed values fail. Preserve kernel and kdump settings.
+This follows the [kernel crash reservation semantics](https://docs.kernel.org/admin-guide/kdump/kdump.html)
+and the [vendor reservation ranges](https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/managing_monitoring_and_updating_the_kernel/supported-kdump-configurations-and-targets_assembly_managing-kernel-command-line-parameters-with-uki).
 
 Open `/dev/kvm` as root, require KVM_GET_API_VERSION=12, call KVM_CREATE_VM and
 immediately close its descriptor. This is capability proof, not a nested workload.

@@ -369,6 +369,7 @@ class TestGuestVerifier(unittest.TestCase):
             "ipv4": [req["host"]["ansible_host"]],
             "cpus": 2,
             "memory_bytes": 4 * 1024**3,
+            "crash_reserved_bytes": 0,
             "filesystem_bytes": 31 * 1024**3,
             "security": "apparmor-enforcing",
             "kvm_api": 12,
@@ -393,6 +394,57 @@ class TestGuestVerifier(unittest.TestCase):
         for field, value in cases.items():
             with self.subTest(field=field), self.assertRaises(guest_verify.GuestError):
                 guest_verify.validate_observation(req, dict(observed, **{field: value}))
+
+        for configured_mib, usable, reserved in (
+            (4096, 3819302912, 256 * 1024**2),
+            (4096, 4 * 1024**3, 0),
+            (4096, 3584 * 1024**2, 512 * 1024**2),
+            (512, 384 * 1024**2, 128 * 1024**2),
+        ):
+            req["host"]["memory_mib"] = configured_mib
+            with self.subTest(configured_mib=configured_mib, reserved=reserved):
+                guest_verify.validate_observation(
+                    req, dict(observed, memory_bytes=usable, crash_reserved_bytes=reserved)
+                )
+        for configured_mib, usable, reserved in (
+            (4096, 3 * 1024**3, 256 * 1024**2),
+            (4096, 4 * 1024**3, -1),
+            (4096, 4 * 1024**3, True),
+            (4096, 4 * 1024**3, "0"),
+            (4096, 4 * 1024**3, None),
+            (4096, 4 * 1024**3, 512 * 1024**2 + 1),
+            (512, 512 * 1024**2, 128 * 1024**2 + 1),
+            (4096, 4 * 1024**3, 2**64),
+            (4096, 4 * 1024**3 + 1, 0),
+            (4096, 4 * 1024**3, 1),
+            (4096, True, 0),
+            (4096, -1, 0),
+        ):
+            req["host"]["memory_mib"] = configured_mib
+            with self.subTest(usable=usable, reserved=reserved):
+                with self.assertRaises(guest_verify.GuestError):
+                    guest_verify.validate_observation(
+                        req, dict(observed, memory_bytes=usable, crash_reserved_bytes=reserved)
+                    )
+        with self.assertRaises(guest_verify.GuestError):
+            guest_verify.validate_observation(
+                req,
+                {key: value for key, value in observed.items() if key != "crash_reserved_bytes"},
+            )
+
+    def test_crash_reservation_uses_native_sysfs_bytes(self):
+        for native, expected in (("0\n", 0), ("268435456\n", 268435456)):
+            with patch.object(guest_verify.Path, "read_text", return_value=native):
+                self.assertEqual(guest_verify.crash_reservation(), expected)
+        with patch.object(guest_verify.Path, "read_text", side_effect=FileNotFoundError):
+            self.assertEqual(guest_verify.crash_reservation(), 0)
+        for native in ("", "-1", "1.0", "True", "0x100", "1 2", "1" * 21):
+            with patch.object(guest_verify.Path, "read_text", return_value=native):
+                with self.assertRaises(guest_verify.GuestError):
+                    guest_verify.crash_reservation()
+        with patch.object(guest_verify.Path, "read_text", side_effect=PermissionError):
+            with self.assertRaises(OSError):
+                guest_verify.crash_reservation()
 
     def test_kvm_descriptors_close_on_success_and_failure(self):
         with (

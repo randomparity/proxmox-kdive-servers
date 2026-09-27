@@ -166,12 +166,22 @@ def identity_observation():
     }
 
 
+def crash_reservation():
+    try:
+        value = Path("/sys/kernel/kexec_crash_size").read_text().strip()
+    except FileNotFoundError:
+        return 0
+    check(bool(re.fullmatch(r"[0-9]{1,20}", value)), "Invalid native crash memory reservation")
+    return int(value)
+
+
 def observation(request):
     memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
     filesystem = os.statvfs("/")
     return identity_observation() | {
         "cpus": os.cpu_count(),
         "memory_bytes": int(memory["MemTotal"].split()[0]) * 1024,
+        "crash_reserved_bytes": crash_reservation(),
         "filesystem_bytes": filesystem.f_blocks * filesystem.f_frsize,
         "security": security_state(request["host"]["profile"]),
         "kvm_api": kvm_probe(),
@@ -211,17 +221,26 @@ def validate_observation(request, result):
         type(result.get("cpus")) is int and result["cpus"] == host["cores"],
         "Guest CPU count differs",
     )
-    for field, minimum in (
-        ("memory_bytes", host["memory_mib"] * 1024**2 * 0.9),
-        (
-            "filesystem_bytes",
-            host["disk_gib"] * 1024**3 - max(2 * 1024**3, host["disk_gib"] * 1024**3 * 0.1),
-        ),
-    ):
-        check(
-            type(result.get(field)) is int and result[field] >= minimum,
-            "Guest memory/filesystem capacity insufficient; inspect first-boot growth",
-        )
+    configured = host["memory_mib"] * 1024**2
+    usable, reserved = result.get("memory_bytes"), result.get("crash_reserved_bytes")
+    check(
+        type(usable) is int
+        and 0 < usable <= configured
+        and type(reserved) is int
+        and 0 <= reserved <= min(512 * 1024**2, configured // 4)
+        and usable + reserved <= configured,
+        "Guest memory evidence invalid; inspect usable RAM and native crash reservation",
+    )
+    check(
+        usable + reserved >= configured * 0.9,
+        "Guest memory capacity insufficient; inspect allocation and crash reservation",
+    )
+    disk = host["disk_gib"] * 1024**3
+    check(
+        type(result.get("filesystem_bytes")) is int
+        and result["filesystem_bytes"] >= disk - max(2 * 1024**3, disk * 0.1),
+        "Guest filesystem capacity insufficient; inspect first-boot growth",
+    )
     security = "apparmor-enforcing" if host["profile"] == "ubuntu" else "selinux-enforcing"
     check(result.get("security") == security, "Guest security enforcement differs")
     check(
