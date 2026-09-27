@@ -97,7 +97,7 @@ class TestGuestHost(unittest.TestCase):
             description=guest_host.marker(self.request, "ready"),
             net0="virtio=02:11:22:33:44:55,bridge=vmbr0",
             scsi0="pool:vm-1101-disk-0,size=32G",
-            ide2="pool:vm-1101-cloudinit,media=cdrom",
+            scsi1="pool:vm-1101-cloudinit,media=cdrom",
             efidisk0="pool:vm-1101-disk-1,efitype=4m,pre-enrolled-keys=1,size=4M",
         )
         config["ipconfig0"] = ",".join(reversed(config["ipconfig0"].split(",")))
@@ -105,7 +105,7 @@ class TestGuestHost(unittest.TestCase):
         for key, value in [
             ("onboot", 1),
             ("memory", 2),
-            ("scsi1", "foreign:disk"),
+            ("ide2", "foreign:disk"),
             ("description", "foreign"),
             ("template", 1),
             ("ciupgrade", 1),
@@ -348,6 +348,7 @@ class GuestNativeFixture:
             config = copy.deepcopy(self.template.config)
             config.pop("template")
             config.update(name=opts["--name"], description=opts["--description"])
+            config["digest"] = "a" * 40
             config["smbios1"] = f"uuid=00000000-0000-4000-8000-{vmid:012d}"
             for slot in ("scsi0", "ide2", "efidisk0"):
                 config[slot] = (
@@ -371,6 +372,19 @@ class GuestNativeFixture:
         guest = self.guests[vmid]
         if argv[:2] == ["qm", "set"]:
             opts = dict(zip(argv[3::2], argv[4::2], strict=True))
+            if "--digest" in opts:
+                if opts.pop("--digest") != guest["config"]["digest"]:
+                    raise guest_host.GuestError("Native configuration changed")
+            if "--delete" in opts:
+                slot = opts.pop("--delete")
+                volume = guest["config"].pop(slot).split(",")[0]
+                self.volumes = [v for v in self.volumes if v["volid"] != volume]
+            if opts.get("--scsi1") == "pool:cloudinit":
+                volume = f"pool:vm-{vmid}-cloudinit"
+                opts["--scsi1"] = volume + ",media=cdrom,size=4M"
+                self.volumes.append(
+                    dict(vmid=vmid, volid=volume, size=4 * 1024**2, format="raw", content="images")
+                )
             for key, value in opts.items():
                 guest["config"][key.removeprefix("--")] = (
                     Path(value).read_text() if key == "--sshkeys" else value
@@ -486,7 +500,7 @@ class TestNativeLifecycle(unittest.TestCase):
         self.assertEqual(events[-1]["action"], "created")
         self.assertTrue(self.fixture.guests[1101]["config"]["description"].endswith(":ready"))
         writes = [c[1] for c in self.fixture.calls if c[0] == "qm"]
-        self.assertEqual(writes, ["clone", "set", "resize", "start", "agent", "set"])
+        self.assertEqual(writes, ["clone", "set", "resize", "set", "set", "start", "agent", "set"])
         self.fixture.calls.clear()
         self.assertEqual(self.execute("apply")[-1]["action"], "preserved")
         self.assertEqual([c[1] for c in self.fixture.calls if c[0] == "qm"], ["agent"])
@@ -507,6 +521,84 @@ class TestNativeLifecycle(unittest.TestCase):
         with self.assertRaises(guest_host.GuestError):
             self.execute("apply")
         self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
+
+    def test_fresh_seed_uses_scsi_and_preserves_template_root_efi_and_uuid(self):
+        template = copy.deepcopy(self.fixture.template.config)
+        self.execute("apply")
+        config = self.fixture.guests[1101]["config"]
+        self.assertNotIn("ide2", config)
+        self.assertIn("cloudinit,media=cdrom", config["scsi1"])
+        self.assertEqual(self.fixture.template.config, template)
+        self.assertEqual(config["smbios1"], "uuid=00000000-0000-4000-8000-000000001101")
+        self.assertIn("vm-1101-disk-0", config["scsi0"])
+        self.assertIn("vm-1101-disk-1", config["efidisk0"])
+        removals = [c for c in self.fixture.calls if "--delete" in c]
+        self.assertEqual(len(removals), 1)
+        self.assertEqual(removals[0][removals[0].index("--delete") + 1], "ide2")
+        self.assertIn("--digest", removals[0])
+        self.assertEqual(len(self.fixture.volumes), 3)
+
+    def test_unowned_or_invalid_seed_is_never_removed(self):
+        for invalid in ("foreign", "root_disk", "oversized", "pending"):
+            with self.subTest(invalid=invalid):
+                self.fixture.guests.clear()
+                self.fixture.volumes.clear()
+                self.fixture.calls.clear()
+
+                def command(argv, invalid=invalid, **kwargs):
+                    result = self.fixture(argv, **kwargs)
+                    if argv[:2] == ["qm", "resize"]:
+                        guest = self.fixture.guests[1101]
+                        if invalid == "foreign":
+                            guest["config"]["ide2"] = "pool:vm-9999-cloudinit,media=cdrom"
+                        elif invalid == "root_disk":
+                            guest["config"]["ide2"] = guest["config"]["scsi0"]
+                        elif invalid == "pending":
+                            guest["pending"] = [{"key": "ide2", "delete": 1}]
+                        else:
+                            for volume in self.fixture.volumes:
+                                if volume["volid"].endswith("cloudinit"):
+                                    volume["size"] = 1024**3
+                    return result
+
+                with patch.object(guest_host, "command", side_effect=command):
+                    with self.assertRaises(guest_host.GuestError):
+                        self.execute("apply")
+                self.assertFalse(any("--delete" in c for c in self.fixture.calls))
+                self.assertEqual(self.fixture.guests[1101]["status"], "stopped")
+
+    def test_nonseed_change_during_replacement_stops_before_attach(self):
+        def command(argv, **kwargs):
+            result = self.fixture(argv, **kwargs)
+            if "--delete" in argv:
+                self.fixture.guests[1101]["config"]["smbios1"] = (
+                    "uuid=00000000-0000-4000-8000-000000009999"
+                )
+            return result
+
+        with patch.object(guest_host, "command", side_effect=command):
+            with self.assertRaises(guest_host.GuestError):
+                self.execute("apply")
+        self.assertFalse(any("--scsi1" in c for c in self.fixture.calls))
+        self.assertEqual(self.fixture.guests[1101]["status"], "stopped")
+
+    def test_seed_allocation_failure_retains_root_and_efi_without_cleanup(self):
+        def command(argv, **kwargs):
+            if "--scsi1" in argv:
+                raise guest_host.GuestError("Native seed allocation failed")
+            return self.fixture(argv, **kwargs)
+
+        with patch.object(guest_host, "command", side_effect=command):
+            with self.assertRaises(guest_host.GuestError):
+                self.execute("apply")
+        guest = self.fixture.guests[1101]
+        self.assertEqual(guest["status"], "stopped")
+        self.assertTrue(guest["config"]["description"].endswith(":preparing"))
+        self.assertEqual(len(self.fixture.volumes), 2)
+        self.assertTrue(all(not v["volid"].endswith("cloudinit") for v in self.fixture.volumes))
+        self.assertIn("vm-1101-disk-0", guest["config"]["scsi0"])
+        self.assertIn("vm-1101-disk-1", guest["config"]["efidisk0"])
+        self.assertNotIn("destroy", [c[1] for c in self.fixture.calls if c[0] == "qm"])
 
     def test_slow_successful_guest_can_acknowledge_within_controller_budget(self):
         reader, writer = os.pipe()

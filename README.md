@@ -246,6 +246,11 @@ Native cooperating locks serialize allocations and selected VM/template operatio
 through readiness. Full clones receive exact hardware/static networking, optional
 VLAN, keys, `host` CPU, guest agent, no ballooning, no automatic startup and no
 general cloud-init package upgrade. Root filesystem growth is verified after boot.
+Before first start, provisioning replaces only the clone's generated IDE cloud-init
+seed with a generated `scsi1` seed on its VirtIO SCSI controller. Native removal
+frees the old seed volume; creation regenerates it from inventory. Root and EFI
+volumes, VM UUID and source templates are preserved and checked. Failure leaves
+an inspectable partial; reruns do not resume or repair it.
 Only fresh clones receive management preparation: the pinned Ubuntu image needs
 `qemu-guest-agent`; the other three already contain it. Existing SSH/sudo/Python/
 cloud-init are checked. The installed guest KVM vendor module is loaded and named

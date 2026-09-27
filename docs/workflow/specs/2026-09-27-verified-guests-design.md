@@ -70,6 +70,16 @@ before further changes. Configure CPU host, exact cores/RAM, balloon disabled,
 static network/VLAN/resolvers, short name plus search domain, cloud-init account
 and keys, guest agent enabled, `ciupgrade=0`, and `onboot=0`; grow the root disk.
 Verify managed disks and native snapshot capability for the future #5 consumer.
+Before first start, replace the owned clone's generated IDE cloud-init seed with
+a generated seed on `scsi1`, using its existing VirtIO SCSI controller. The pinned
+Fedora guest did not discover the IDE CD-ROM despite valid host-side `cidata` media;
+SCSI effectiveness remains a required live-proof arm. This frees and creates only
+the small generated seed volume; it never removes root or EFI volumes. Validate
+the stopped preparing clone, exact seed ownership/type/size and all managed disks
+before removal. Use native configuration digests, read back each step, and require
+all other configuration, including UUID/root/EFI references, to remain identical.
+Keep source-template IDE configuration and its verification unchanged. A failed
+replacement leaves a stopped inspectable partial; ordinary commands never resume it.
 
 The marker has `preparing` and `ready` phases. It binds the same configuration
 identity across provisioning and future snapshot verification. A fresh run may

@@ -199,7 +199,7 @@ def check_configuration(request, config, pending, phase):
         "description",
         "net0",
         "scsi0",
-        "ide2",
+        "scsi1",
         "efidisk0",
         "digest",
         "meta",
@@ -227,10 +227,19 @@ def check_configuration(request, config, pending, phase):
     )
 
 
-def inspect_guest(request, phase="ready", running=True):
+def inspect_guest(request, phase="ready", running=True, seed_pending=False):
     path = base_path(request)
     config = native(path + "/config")
-    check_configuration(request, config, native(path + "/pending"), phase)
+    check(isinstance(config, dict), "Invalid native guest configuration")
+    checked = config
+    if seed_pending:
+        check(
+            phase == "preparing" and not running and "ide2" in config and "scsi1" not in config,
+            "Seed replacement requires the stopped owned clone's original IDE seed",
+        )
+        checked = {key: value for key, value in config.items() if key != "ide2"}
+        checked["scsi1"] = config["ide2"]
+    check_configuration(request, checked, native(path + "/pending"), phase)
     status = native(path + "/status/current")
     check(
         isinstance(status, dict) and status.get("status") == ("running" if running else "stopped"),
@@ -241,7 +250,8 @@ def inspect_guest(request, phase="ready", running=True):
     t["image"] = dict(t["image"], virtual_size_bytes=h["disk_gib"] * 1024**3)
     storage = native(f"/nodes/{t['node']}/storage/{t['storage']}/status")
     extent = template_host.lvm_extent(t) if storage.get("type") == "lvmthin" else 0
-    template_host.verify_disks(t, config, extent)
+    # Reuse the template volume policy while keeping its original IDE layout unchanged.
+    template_host.verify_disks(t, checked | {"ide2": checked.get("scsi1")}, extent)
     feature = native(path + "/feature", "--feature", "snapshot")
     check(
         isinstance(feature, dict) and feature.get("hasFeature") == 1,
@@ -338,7 +348,39 @@ def clone(request):
             argv.extend(["--" + key, value])
         command(argv)
     command(["qm", "resize", str(h["vmid"]), "scsi0", str(h["disk_gib"]) + "G"], timeout=600)
-    inspect_guest(request, phase="preparing", running=False)
+    config = inspect_guest(request, phase="preparing", running=False, seed_pending=True)
+    check(
+        isinstance(config.get("digest"), str)
+        and re.fullmatch(r"[a-f0-9]{40}", config["digest"]) is not None,
+        "Missing native configuration digest before seed replacement",
+    )
+    command(["qm", "set", str(h["vmid"]), "--delete", "ide2", "--digest", config["digest"]])
+    detached = native(base_path(request) + "/config")
+    preserved = {key: value for key, value in config.items() if key not in {"ide2", "digest"}}
+    check(
+        isinstance(detached, dict)
+        and {key: value for key, value in detached.items() if key != "digest"} == preserved
+        and isinstance(detached.get("digest"), str)
+        and re.fullmatch(r"[a-f0-9]{40}", detached["digest"]) is not None,
+        "Guest changed during seed replacement; inspect retained partial",
+    )
+    command(
+        [
+            "qm",
+            "set",
+            str(h["vmid"]),
+            "--scsi1",
+            h["storage"] + ":cloudinit",
+            "--digest",
+            detached["digest"],
+        ]
+    )
+    attached = inspect_guest(request, phase="preparing", running=False)
+    check(
+        {key: value for key, value in attached.items() if key not in {"scsi1", "digest"}}
+        == preserved,
+        "Guest changed during seed replacement; inspect retained partial",
+    )
     command(["qm", "start", str(h["vmid"])], timeout=180)
 
 
