@@ -102,12 +102,15 @@ class TestGuestHost(unittest.TestCase):
             "vmid": self.host["vmid"],
             "identity": guest_host.identity(self.request),
             "verified": True,
+            "phase": "prepared",
         }
         for wrong in [
             dict(expected, vmid=999),
             dict(expected, identity="b" * 64),
             dict(expected, verified=False),
             dict(expected, extra=1),
+            dict(expected, phase="post-reboot"),
+            {k: v for k, v in expected.items() if k != "phase"},
             {},
         ]:
             with self.subTest(wrong=wrong), self.assertRaises(guest_host.GuestError):
@@ -958,7 +961,12 @@ class TestNativeLifecycle(unittest.TestCase):
 
     def execute(self, mode, ack=None):
         if ack is None:
-            ack = {"vmid": 1101, "identity": guest_host.identity(self.req), "verified": True}
+            ack = {
+                "vmid": 1101,
+                "identity": guest_host.identity(self.req),
+                "verified": True,
+                "phase": "prepared",
+            }
         output = io.StringIO()
         with (
             patch.object(guest_host, "read_line", return_value=ack),
@@ -967,13 +975,37 @@ class TestNativeLifecycle(unittest.TestCase):
             guest_host.session([self.req], mode)
         return [json.loads(line) for line in output.getvalue().splitlines()]
 
+    def test_replayed_preparation_ack_cannot_promote_after_reboot_request(self):
+        guest_host.clone(self.req)
+        self.req["host"]["profile"] = "opensuse"
+        config = self.fixture.guests[1101]["config"]
+        config["description"] = guest_host.marker(self.req, "preparing")
+        ack = {
+            "vmid": 1101,
+            "identity": guest_host.identity(self.req),
+            "verified": True,
+            "phase": "prepared",
+        }
+        with (
+            patch.object(guest_host, "read_line", side_effect=[ack, ack]),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(guest_host.GuestError),
+        ):
+            guest_host.verify_readiness(self.req, fresh=True)
+        self.assertTrue(config["description"].endswith(":preparing"))
+
     def test_opensuse_ready_requires_two_acks_and_no_native_power_action(self):
         self.assertTrue(callable(getattr(guest_host, "verify_readiness", None)))
         guest_host.clone(self.req)
         self.req["host"]["profile"] = "opensuse"
         config = self.fixture.guests[1101]["config"]
         config["description"] = guest_host.marker(self.req, "preparing")
-        ack = {"vmid": 1101, "identity": guest_host.identity(self.req), "verified": True}
+        ack = {
+            "vmid": 1101,
+            "identity": guest_host.identity(self.req),
+            "verified": True,
+            "phase": "prepared",
+        }
         for fail_at in (0, 1):
             output = io.StringIO()
             effects = [ack] * fail_at + [guest_host.GuestError("deadline")]
@@ -993,7 +1025,9 @@ class TestNativeLifecycle(unittest.TestCase):
         self.fixture.calls.clear()
         output = io.StringIO()
         with (
-            patch.object(guest_host, "read_line", return_value=ack) as read,
+            patch.object(
+                guest_host, "read_line", side_effect=[ack, dict(ack, phase="post-reboot")]
+            ) as read,
             contextlib.redirect_stdout(output),
         ):
             guest_host.verify_readiness(self.req, fresh=True)
@@ -1086,7 +1120,13 @@ class TestNativeLifecycle(unittest.TestCase):
     def test_failed_ack_leaves_preparing_and_rerun_refuses(self):
         with self.assertRaises(guest_host.GuestError):
             self.execute(
-                "apply", {"vmid": 1102, "identity": guest_host.identity(self.req), "verified": True}
+                "apply",
+                {
+                    "vmid": 1102,
+                    "identity": guest_host.identity(self.req),
+                    "verified": True,
+                    "phase": "prepared",
+                },
             )
         self.assertTrue(self.fixture.guests[1101]["config"]["description"].endswith(":preparing"))
         self.fixture.calls.clear()
@@ -1174,7 +1214,12 @@ class TestNativeLifecycle(unittest.TestCase):
 
     def test_slow_successful_guest_can_acknowledge_within_controller_budget(self):
         reader, writer = os.pipe()
-        ack = {"vmid": 1101, "identity": guest_host.identity(self.req), "verified": True}
+        ack = {
+            "vmid": 1101,
+            "identity": guest_host.identity(self.req),
+            "verified": True,
+            "phase": "prepared",
+        }
         os.write(writer, (json.dumps(ack) + "\n").encode())
         os.close(writer)
         read_line = guest_host.read_line
@@ -1445,11 +1490,10 @@ class TestRebootExchange(unittest.TestCase):
         code = (
             "import sys,json;json.loads(sys.stdin.readline());print("
             + repr(json.dumps(prepared))
-            + ",flush=True);json.loads(sys.stdin.readline());print("
+            + ",flush=True);assert json.loads(sys.stdin.readline())['phase'] == 'prepared';print("
             + repr(json.dumps(reboot))
-            + ",flush=True);json.loads(sys.stdin.readline());print("
-            + repr(json.dumps(ready))
-            + ",flush=True)"
+            + ",flush=True);assert json.loads(sys.stdin.readline())['phase'] == "
+            "'post-reboot';print(" + repr(json.dumps(ready)) + ",flush=True)"
         )
         boot, effects = old, []
 

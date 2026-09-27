@@ -165,6 +165,9 @@ An ambiguous reboot response stops for inspection rather than repeating it.
 Reconnect with the existing SSH pin, require the same UUID and a different valid
 boot ID, and run the full common verifier with preparation disabled. Only its
 correlated acknowledgement allows ready marking. Boot identity remains private.
+Acknowledgements carry the expected internal phase: `prepared` for initial
+verification and `post-reboot` for the second openSUSE verification. A missing,
+wrong or replayed first-phase acknowledgement cannot promote the guest to ready.
 Ready reruns and all other profiles never enter this reboot phase. A second or
 unexpected reboot event is rejected, and failure retains the owned partial.
 

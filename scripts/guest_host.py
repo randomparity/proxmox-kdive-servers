@@ -395,10 +395,11 @@ def clone(request):
     command(["qm", "start", str(h["vmid"])], timeout=180)
 
 
-def verify_ack(request, ack):
+def verify_ack(request, ack, phase="prepared"):
     check(
         isinstance(ack, dict)
-        and set(ack) == {"vmid", "identity", "verified"}
+        and set(ack) == {"vmid", "identity", "verified", "phase"}
+        and ack["phase"] == phase
         and type(ack["vmid"]) is int
         and ack["vmid"] == request["host"]["vmid"]
         and ack["identity"] == identity(request)
@@ -451,7 +452,7 @@ def verify_readiness(request, fresh):
         )
         emit(request, "reboot", guest_uuid=guest_uuid)
         # One reboot RPC 60s + strict reconnect 600s + read-only RPC 1800s + margin.
-        verify_ack(request, read_line(2700))
+        verify_ack(request, read_line(2700), phase="post-reboot")
     command(["qm", "agent", str(request["host"]["vmid"]), "ping"], timeout=60)
     ready_input = inspect_guest(request, phase=phase)
     check(ready_input == config, "Guest configuration changed during readiness")

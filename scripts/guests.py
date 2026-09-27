@@ -377,7 +377,12 @@ def complete_guest(process, request, event, mode, known_hosts):
     require(not event["fresh"] or mode == "apply", "Native guest", "unexpected mutation")
     guest_uuid, fresh = event["guest_uuid"], event["fresh"]
     observations = verify_guest(request, known_hosts, fresh, guest_uuid)
-    ack = {"vmid": event["vmid"], "identity": event["identity"], "verified": True}
+    ack = {
+        "vmid": event["vmid"],
+        "identity": event["identity"],
+        "verified": True,
+        "phase": "prepared",
+    }
     process.stdin.write((json.dumps(ack) + "\n").encode())
     process.stdin.flush()
     event = read_event(process)
@@ -390,7 +395,7 @@ def complete_guest(process, request, event, mode, known_hosts):
         )
         require(result == {"reboot_requested": True}, "Guest reboot", "invalid acknowledgement")
         observations = verify_guest(request, known_hosts, False, guest_uuid, after_boot=boot)
-        process.stdin.write((json.dumps(ack) + "\n").encode())
+        process.stdin.write((json.dumps(dict(ack, phase="post-reboot")) + "\n").encode())
         process.stdin.flush()
         event = read_event(process)
     validate_event(request, event, "ready")
