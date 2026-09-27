@@ -37,6 +37,9 @@ else:
     )
 
 
+REBOOT_DISCONNECTED = object()
+
+
 def request_for(host, revision, source):
     require(isinstance(source, dict), "source template", "missing authenticated configuration")
     net = guest_host.template_host.properties(source.get("net0"))
@@ -165,6 +168,8 @@ def guest_rpc(request, known_hosts, envelope, timeout):
         raise ValidationError(
             "Guest RPC timed out; inspect retained partial without retry"
         ) from None
+    if set(envelope) == {"reboot_from"} and result.returncode == 255 and not result.stdout:
+        return REBOOT_DISCONNECTED
     require(
         result.returncode == 0 and len(result.stdout) <= 65536 and not result.stderr.strip(),
         "Guest baseline",
@@ -393,7 +398,11 @@ def complete_guest(process, request, event, mode, known_hosts):
         result = guest_rpc(
             dict(request, guest_uuid=guest_uuid), known_hosts, {"reboot_from": boot}, 60
         )
-        require(result == {"reboot_requested": True}, "Guest reboot", "invalid acknowledgement")
+        require(
+            result is REBOOT_DISCONNECTED or result == {"reboot_requested": True},
+            "Guest reboot",
+            "invalid acknowledgement",
+        )
         observations = verify_guest(request, known_hosts, False, guest_uuid, after_boot=boot)
         process.stdin.write((json.dumps(dict(ack, phase="post-reboot")) + "\n").encode())
         process.stdin.flush()

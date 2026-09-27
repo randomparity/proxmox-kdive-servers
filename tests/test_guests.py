@@ -1509,16 +1509,27 @@ class TestRebootExchange(unittest.TestCase):
                 if "reboot_from" in envelope:
                     effects.append("reboot")
                     self.assertEqual(envelope["reboot_from"], old)
-                    boot = new
-                    if fault == "reboot-error":
+                    boot = old if fault == "disconnect-unchanged" else new
+                    if fault in {"disconnect", "disconnect-unchanged", "disconnect-post-boot"}:
                         return subprocess.CompletedProcess(argv, 255, "", "disconnected")
-                    output = json.dumps({"reboot_requested": True})
+                    if fault == "reboot-error":
+                        return subprocess.CompletedProcess(argv, 1, "", "guest error")
+                    if fault == "partial":
+                        return subprocess.CompletedProcess(argv, 255, "{", "disconnected")
+                    output = (
+                        "null" if fault == "invalid-ack" else json.dumps({"reboot_requested": True})
+                    )
                 else:
                     effects.append("prepare" if envelope["fresh"] else "verify")
                     output = json.dumps(
                         dict(
                             guest_uuid=guest_id,
-                            boot_id=old if fault == "post-boot" and not envelope["fresh"] else boot,
+                            boot_id=(
+                                old
+                                if fault in {"post-boot", "disconnect-post-boot"}
+                                and not envelope["fresh"]
+                                else boot
+                            ),
                             os_id="opensuse-leap",
                             release="16.0",
                             architecture="x86_64",
@@ -1547,13 +1558,22 @@ class TestRebootExchange(unittest.TestCase):
                     )
             return subprocess.CompletedProcess(argv, 0, output, "")
 
+        wait = guests.wait_guest
+
+        def bounded_wait(*args):
+            if fault == "disconnect-unchanged" and args[-1]:
+                with patch.object(guests.time, "monotonic", side_effect=[0, 601]):
+                    return wait(*args)
+            return wait(*args)
+
         with tempfile.TemporaryDirectory() as directory:
             pins = Path(directory) / "known_hosts"
             with (
                 patch.object(guests, "host_ssh", return_value=[sys.executable, "-u", "-c", code]),
                 patch.object(guests.subprocess, "run", side_effect=ssh),
+                patch.object(guests, "wait_guest", side_effect=bounded_wait),
             ):
-                if fault:
+                if fault and fault != "disconnect":
                     with self.assertRaises(ValueError):
                         guests.dispatch([req], "apply", pins)
                     self.assertEqual(
@@ -1569,6 +1589,30 @@ class TestRebootExchange(unittest.TestCase):
         self.exercise_exchange()
 
     def test_failed_or_repeated_reboot_exchange_never_retries(self):
-        for fault in ("uuid", "missing", "repeat", "reboot-error", "post-boot"):
+        for fault in (
+            "uuid",
+            "missing",
+            "repeat",
+            "reboot-error",
+            "post-boot",
+            "disconnect-unchanged",
+            "disconnect-post-boot",
+            "partial",
+            "invalid-ack",
+        ):
             with self.subTest(fault=fault):
                 self.exercise_exchange(fault)
+
+    def test_disconnect_after_single_reboot_requires_full_postboot_proof(self):
+        self.exercise_exchange("disconnect")
+
+    def test_disconnect_during_other_rpc_remains_failure(self):
+        req = request()
+        with patch.object(
+            guests.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 255, "", "disconnected"),
+        ):
+            for envelope in ({"fresh": True}, {"fresh": False}):
+                with self.subTest(envelope=envelope), self.assertRaises(ValidationError):
+                    guests.guest_rpc(req, Path("/unused"), envelope, 1)

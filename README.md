@@ -284,8 +284,9 @@ integrity lockdown stay enforced. Other missing vendor KVM modules fail.
 After initial verification, fresh openSUSE receives one graceful authenticated
 `systemctl --no-block reboot` request. Strict reconnect must prove the same VM
 UUID, changed boot identity and full baseline again before ready marking. A
-failure or ambiguous disconnect retains the partial; there is no forced power
-fallback, reboot retry or automatic recovery. Ready reruns remain read-only.
+failure retains the partial. An empty SSH disconnect during the one reboot request
+requires the same strict post-boot proof; invalid responses stop for inspection.
+There is no forced power fallback, reboot retry or automatic recovery. Ready reruns remain read-only.
 No libvirt, KDIVE, build/debug tooling or runners are installed.
 
 Verification checks successful cloud-init, authenticated SSH/noninteractive sudo,

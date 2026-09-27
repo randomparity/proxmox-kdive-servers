@@ -163,7 +163,10 @@ reboot phase while retaining its locks. The controller strictly authenticates th
 guest, rechecks its native-bound UUID and previous boot ID, and issues exactly one
 `systemctl --no-block reboot` request. No force/reset option or retry is used.
 This avoids native reboot operations that can apply pending VM configuration.
-An ambiguous reboot response stops for inspection rather than repeating it.
+Only SSH exit 255 with empty stdout during that reboot request is treated as an
+ambiguous disconnect. It does not acknowledge success: proceed only to the strict
+post-boot proof below, without issuing another reboot. Other failures and invalid
+or partial responses stop for inspection.
 
 Reconnect with the existing SSH pin, require the same UUID and a different valid
 boot ID, and run the full common verifier with preparation disabled. Only its
