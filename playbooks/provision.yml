@@ -1,0 +1,9 @@
+---
+- name: Provision selected verified guests from the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    proxmox_guest_verify_only: false
+  roles:
+    - role: proxmox_guest

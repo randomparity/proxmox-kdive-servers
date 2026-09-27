@@ -191,8 +191,27 @@ def template_inputs(host):
 
 
 def validate_host(host):
-    validate_common(host)
+    validate_template_host(host)
     integer(host.get("vmid"), "vmid", 100, 999999999)
+    fqdn = host.get("fqdn")
+    require(
+        isinstance(fqdn, str)
+        and len(fqdn) <= 253
+        and len(fqdn.split(".")) >= 2
+        and not fqdn.replace(".", "").isdigit()
+        and all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in fqdn.split(".")
+        ),
+        "fqdn",
+        "supply a lowercase fully qualified DNS name with valid labels",
+    )
+    if host.get("ansible_ssh_private_key_file") not in (None, ""):
+        text_field(
+            host["ansible_ssh_private_key_file"],
+            "ansible_ssh_private_key_file",
+            r"[^\x00-\x1f\x7f{}]+",
+        )
     for field in ("cores", "memory_mib", "disk_gib"):
         integer(host.get(field), field)
     text_field(host.get("ansible_user"), "ansible_user", r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
@@ -265,7 +284,7 @@ def managed_hosts(data):
 def validate_inventory(data, targets=None, purpose="guests"):
     require(purpose in {"guests", "templates"}, "purpose", "choose guests or templates")
     hosts = managed_hosts(data)
-    ids, addresses, templates = set(), set(), {}
+    ids, addresses, names, templates = set(), set(), set(), {}
     for host in hosts.values():
         (validate_host if purpose == "guests" else validate_template_host)(host)
         if host.get("vmid") is not None:
@@ -278,15 +297,18 @@ def validate_inventory(data, targets=None, purpose="guests"):
                 "addresses must be unique across managed targets",
             )
             addresses.add(host["ansible_host"])
-        else:
-            vmid = host["template_vmid"]
-            inputs = template_inputs(host)
             require(
-                vmid not in templates or templates[vmid] == inputs,
-                "template_vmid",
-                "shared template IDs must have identical template inputs",
+                host["fqdn"] not in names, "fqdn", "names must be unique across managed targets"
             )
-            templates[vmid] = inputs
+            names.add(host["fqdn"])
+        vmid = host["template_vmid"]
+        inputs = template_inputs(host)
+        require(
+            vmid not in templates or templates[vmid] == inputs,
+            "template_vmid",
+            "shared template IDs must have identical template inputs",
+        )
+        templates[vmid] = inputs
     require(not ids.intersection(templates), "template_vmid", "must not collide with guest IDs")
     if targets is None:
         return len(hosts)

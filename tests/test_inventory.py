@@ -163,6 +163,32 @@ class TestValidation(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 validate_inventory(self.data)
 
+    def test_guest_dns_identity(self):
+        original = self.host.get("fqdn")
+        for value in [
+            None,
+            "short",
+            "UPPER.example.invalid",
+            "a..invalid",
+            "-a.example",
+            "a.example.",
+            "a_b.example",
+            "a" * 64 + ".example",
+            "1.2.3.4",
+        ]:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                self.host["fqdn"] = value
+                validate_inventory(self.data)
+        self.host["fqdn"] = original
+        self.data["_meta"]["hostvars"]["rocky_local"]["fqdn"] = original
+        with self.assertRaisesRegex(ValidationError, "unique"):
+            validate_inventory(self.data, "fedora_remote")
+
+    def test_guest_validation_checks_template_collisions(self):
+        self.host["vmid"] = self.data["_meta"]["hostvars"]["rocky_local"]["template_vmid"]
+        with self.assertRaisesRegex(ValidationError, "collide"):
+            validate_inventory(self.data, "fedora_remote")
+
 
 class TestTemplateValidation(unittest.TestCase):
     def setUp(self):

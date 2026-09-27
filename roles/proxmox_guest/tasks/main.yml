@@ -1,0 +1,11 @@
+---
+- name: Run the selected guest baseline operation
+  ansible.builtin.command:
+    argv: >-
+      {{ [ansible_playbook_python, playbook_dir + '/../scripts/guests.py'] +
+         (['--verify'] if proxmox_guest_verify_only else []) }}
+  register: proxmox_guest_result
+  changed_when: >-
+    proxmox_guest_result.stdout_lines | map('from_json') |
+    selectattr('action', 'equalto', 'created') | list | length > 0
+  no_log: true
