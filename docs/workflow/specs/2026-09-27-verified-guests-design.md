@@ -188,6 +188,13 @@ Ansible inventory remains directly usable; controller Python is not guest Python
 
 ## Validation
 
+Successful bootstrap permits only the verified Proxmox scalar-`user` deprecation:
+cloud-init status `done`, no true errors, exit 0 or 2, and every recoverable notice
+exactly the advisory naming deprecation in 22.2 and removal in 27.2. Exit 2 without
+that advisory and all mixed/unknown notices fail. Preserve warnings in guest logs;
+this compatibility classification neither repairs the generator nor weakens identity,
+security or KVM checks. Native generator format changes remain host lifecycle work.
+
 Focused tests cover FQDN validation and global identity collisions; explicit
 selection; capacity boundaries/missing metrics; absent versus failed resource
 reads; template ownership and source drift; clone/configure/readiness ordering;

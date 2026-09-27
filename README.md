@@ -228,6 +228,14 @@ Keep the private inventory directory mode 0700. Provisioning creates its
 `accept-new` once on the operator-trusted lab network; privileged preparation and
 subsequent access use strict verification. This assumes trustworthy first contact.
 Stored keys are never removed/replaced: a mismatch requires operator inspection.
+
+Cloud-init must finish with no errors. One exact compatibility advisory is accepted:
+Proxmox 9.2 generates a scalar `user` value, which cloud-init deprecates until its
+scheduled removal in 27.2. Status must be `done`; every recoverable notice must be
+that advisory. All other notices and failures are rejected. This explains the
+documented [cloud-init exit code 2](https://docs.cloud-init.io/en/latest/explanation/return_codes.html)
+seen with the pinned Fedora image; it does not change the host generator or suppress
+guest logging. Template/host lifecycle owners must address the format before removal.
 Private keys remain on the controller. Optional `ansible_ssh_private_key_file`
 selects the guest identity; otherwise ordinary OpenSSH identities apply.
 Inventory paths may contain spaces. Literal `${`, line breaks and NUL are rejected

@@ -230,15 +230,47 @@ def validate_observation(request, result):
     )
 
 
-def run(request, fresh=False):
-    check(os.geteuid() == 0 and platform.system() == "Linux", "Verifier requires Linux and sudo")
-    cloud = json.loads(command(["cloud-init", "status", "--wait", "--format", "json"], timeout=600))
+def cloud_init_ready():
+    try:
+        result = subprocess.run(
+            ["cloud-init", "status", "--wait", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise GuestError("Cloud-init status unavailable/timed out; inspect bootstrap") from None
+    cloud = json.loads(result.stdout)
+    check(isinstance(cloud, dict), "Invalid cloud-init status")
+    notices = cloud.get("recoverable_errors", {})
+    # Proxmox 9.2 generates scalar user data; accept only its verified advisory.
+    advisory = (
+        "'user' of type string is deprecated in 22.2 and scheduled to be removed in 27.2. "
+        "Use 'users' list instead."
+    )
+    known_advisory = (
+        isinstance(notices, dict)
+        and set(notices) == {"DEPRECATED"}
+        and (
+            isinstance(notices["DEPRECATED"], list)
+            and bool(notices["DEPRECATED"])
+            and all(message == advisory for message in notices["DEPRECATED"])
+        )
+    )
     check(
-        cloud.get("status") == "done"
-        and not cloud.get("errors")
-        and not cloud.get("recoverable_errors"),
+        result.returncode in {0, 2}
+        and not result.stderr.strip()
+        and cloud.get("status") == "done"
+        and cloud.get("errors", []) == []
+        and (known_advisory or notices == {} and result.returncode == 0),
         "Cloud-init did not complete cleanly",
     )
+
+
+def run(request, fresh=False):
+    check(os.geteuid() == 0 and platform.system() == "Linux", "Verifier requires Linux and sudo")
+    cloud_init_ready()
     validate_identity(request, identity_observation())
     if fresh:
         prepare(request["host"]["profile"])

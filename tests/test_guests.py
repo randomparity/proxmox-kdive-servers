@@ -144,6 +144,48 @@ class TestGuestHost(unittest.TestCase):
 
 
 class TestGuestVerifier(unittest.TestCase):
+    def test_cloud_init_accepts_only_the_native_user_deprecation(self):
+        notice = (
+            "'user' of type string is deprecated in 22.2 and scheduled to be removed in 27.2. "
+            "Use 'users' list instead."
+        )
+        clean = {"status": "done", "errors": [], "recoverable_errors": {}}
+        advisory = dict(clean, recoverable_errors={"DEPRECATED": [notice, notice]})
+        for code, state in [(0, clean), (0, advisory), (2, advisory)]:
+            with (
+                self.subTest(code=code, state=state),
+                patch.object(
+                    guest_verify.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], code, json.dumps(state), ""),
+                ),
+            ):
+                guest_verify.cloud_init_ready()
+        for code, state in [
+            (1, advisory),
+            (2, clean),
+            (3, clean),
+            (2, dict(advisory, status="running")),
+            (2, dict(advisory, errors=["failed module"])),
+            (0, dict(clean, errors=["failed module"])),
+            (2, dict(advisory, recoverable_errors={"DEPRECATED": [notice, "other"]})),
+            (2, dict(advisory, recoverable_errors={"DEPRECATED": [notice], "WARNING": ["other"]})),
+            (2, dict(advisory, recoverable_errors={"DEPRECATED": notice})),
+            (2, dict(advisory, recoverable_errors={"DEPRECATED": []})),
+            (0, dict(clean, errors="")),
+            (0, dict(clean, recoverable_errors=[])),
+        ]:
+            with (
+                self.subTest(code=code, state=state),
+                patch.object(
+                    guest_verify.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], code, json.dumps(state), ""),
+                ),
+                self.assertRaises(guest_verify.GuestError),
+            ):
+                guest_verify.cloud_init_ready()
+
     def test_wrong_peer_identity_is_rejected_before_preparation(self):
         req = request()
         req["guest_uuid"] = "12345678-1234-1234-1234-123456789abc"
@@ -176,7 +218,18 @@ class TestGuestVerifier(unittest.TestCase):
                 def command(argv, calls=calls, **kwargs):
                     calls.append(argv)
                     if argv[0] == "cloud-init":
-                        output = '{"status":"done"}'
+                        output = json.dumps(
+                            {
+                                "status": "done",
+                                "errors": [],
+                                "recoverable_errors": {
+                                    "DEPRECATED": [
+                                        "'user' of type string is deprecated in 22.2 and scheduled "
+                                        "to be removed in 27.2. Use 'users' list instead."
+                                    ]
+                                },
+                            }
+                        )
                     elif argv[0] == "ip":
                         output = json.dumps(
                             [
@@ -191,7 +244,9 @@ class TestGuestVerifier(unittest.TestCase):
                         output = '{"profiles":{"example":"enforce"}}'
                     else:
                         output = "1"
-                    return subprocess.CompletedProcess(argv, 0, output, "")
+                    return subprocess.CompletedProcess(
+                        argv, 2 if argv[0] == "cloud-init" else 0, output, ""
+                    )
 
                 with (
                     patch.object(
@@ -223,7 +278,16 @@ class TestGuestVerifier(unittest.TestCase):
                     patch.object(guest_verify.os, "close"),
                     patch.object(guest_verify.fcntl, "ioctl", side_effect=[12, 11]),
                 ):
-                    with self.assertRaises(guest_verify.GuestError):
+                    message = (
+                        "Guest hostname/FQDN differs"
+                        if wrong == "fqdn"
+                        else (
+                            "Guest OS/release/architecture differs"
+                            if wrong == "release"
+                            else "Guest UUID"
+                        )
+                    )
+                    with self.assertRaisesRegex(guest_verify.GuestError, message):
                         guest_verify.run(req, fresh=True)
                 self.assertFalse(any(c[0] in {"apt-get", "systemctl", "modprobe"} for c in calls))
                 self.assertFalse(module.exists())
