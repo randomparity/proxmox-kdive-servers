@@ -21,9 +21,9 @@ all:
         dns_servers: [192.0.2.53]
         ssh_public_keys:
           - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMFt8b71VD6VGT3G58OYzLwj3buASlbpik4MkyDgYlHM anonymous-example
-        cores: 2
-        memory_mib: 4096
-        disk_gib: 32
+        cores: 8
+        memory_mib: 32768
+        disk_gib: 256
       hosts:
         ubuntu_local:
           profile: ubuntu
