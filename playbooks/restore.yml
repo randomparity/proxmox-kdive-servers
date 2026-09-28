@@ -1,0 +1,9 @@
+---
+- name: Run selected guest restore from the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    proxmox_guest_operation: restore
+  roles:
+    - role: proxmox_guest

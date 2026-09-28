@@ -245,9 +245,9 @@ def guest_rpc(request, known_hosts, envelope, timeout):
         raise ValidationError("Guest baseline: invalid result") from None
 
 
-def wait_guest(request, known_hosts, fresh, after_boot):
+def wait_guest(request, known_hosts, fresh, after_boot, booting=False):
     argv = guest_ssh(request["host"], known_hosts, fresh)
-    deadline = time.monotonic() + (600 if fresh or after_boot else 30)
+    deadline = time.monotonic() + (600 if fresh or after_boot or booting else 30)
     while True:
         try:
             probe = run_guest(
@@ -269,10 +269,13 @@ def wait_guest(request, known_hosts, fresh, after_boot):
         time.sleep(2)
 
 
-def verify_guest(request, known_hosts, fresh, guest_uuid, after_boot=None):
+def verify_guest(request, known_hosts, fresh, guest_uuid, after_boot=None, booting=False):
     request = dict(request, guest_uuid=guest_verify.machine_uuid(guest_uuid))
     prepare_known_hosts(known_hosts, fresh)
-    wait_guest(request, known_hosts, fresh, after_boot)
+    if booting:
+        wait_guest(request, known_hosts, fresh, after_boot, booting=True)
+    else:
+        wait_guest(request, known_hosts, fresh, after_boot)
     observed = guest_rpc(request, known_hosts, {"fresh": fresh}, 1800)
     try:
         guest_verify.validate_observation(request, observed)
@@ -379,7 +382,17 @@ def validate_event(request, event, phase):
         "planned": {"action"},
         "prepared": {"fresh", "guest_uuid"},
         "reboot": {"guest_uuid"},
-        "ready": {"action", "config_sha256", "duration_seconds"},
+        "baseline-boot": {"guest_uuid"},
+        "removed": {"action", "duration_seconds"},
+        "ready": {
+            "action",
+            "config_sha256",
+            "duration_seconds",
+            "snapshot",
+            "snapshot_identity",
+            "snapshot_config_sha256",
+            "snapshot_time",
+        },
     }[phase]
     require(
         isinstance(event, dict)
@@ -394,18 +407,38 @@ def validate_event(request, event, phase):
     if phase == "prepared":
         require(type(event["fresh"]) is bool, "Native guest", "invalid preparation phase")
         guest_verify.machine_uuid(event["guest_uuid"])
-    elif phase == "reboot":
+    elif phase in {"reboot", "baseline-boot"}:
         guest_verify.machine_uuid(event["guest_uuid"])
     else:
-        allowed = {"preserved", "would-create"} if phase == "planned" else {"preserved", "created"}
+        allowed = {
+            "planned": {"preserved", "would-create", "would-restore", "would-destroy", "absent"},
+            "ready": {"preserved", "created", "restored"},
+            "removed": {"destroyed", "absent"},
+        }[phase]
         require(event["action"] in allowed, "Native guest", "invalid action result")
-    if phase == "ready":
+    if phase in {"ready", "removed"}:
         require(
-            isinstance(event["config_sha256"], str)
-            and re.fullmatch(r"[a-f0-9]{64}", event["config_sha256"])
-            and type(event["duration_seconds"]) in {int, float}
+            type(event["duration_seconds"]) in {int, float}
             and math.isfinite(event["duration_seconds"])
             and event["duration_seconds"] >= 0,
+            "Native guest",
+            "invalid duration",
+        )
+    if phase == "ready":
+        require(
+            event["snapshot"] == "clean"
+            and type(event["snapshot_time"]) is int
+            and event["snapshot_time"] > 0
+            and all(
+                isinstance(event[key], str) and re.fullmatch(r"[a-f0-9]{64}", event[key])
+                for key in ("snapshot_identity", "snapshot_config_sha256")
+            ),
+            "Native guest",
+            "invalid snapshot evidence",
+        )
+        require(
+            isinstance(event["config_sha256"], str)
+            and re.fullmatch(r"[a-f0-9]{64}", event["config_sha256"]),
             "Native guest",
             "invalid outcome evidence",
         )
@@ -443,7 +476,7 @@ def read_event(process):
 def complete_guest(process, request, event, mode, known_hosts):
     require(not event["fresh"] or mode == "apply", "Native guest", "unexpected mutation")
     guest_uuid, fresh = event["guest_uuid"], event["fresh"]
-    observations = verify_guest(request, known_hosts, fresh, guest_uuid)
+    observations = verify_guest(request, known_hosts, fresh, guest_uuid, booting=mode == "restore")
     ack = {
         "vmid": event["vmid"],
         "identity": event["identity"],
@@ -469,12 +502,21 @@ def complete_guest(process, request, event, mode, known_hosts):
         process.stdin.write((json.dumps(dict(ack, phase="post-reboot")) + "\n").encode())
         process.stdin.flush()
         event = read_event(process)
+    if fresh:
+        validate_event(request, event, "baseline-boot")
+        require(event["guest_uuid"] == guest_uuid, "Native guest", "baseline boot UUID changed")
+        observations = verify_guest(
+            request, known_hosts, False, guest_uuid, after_boot=observations["boot_id"]
+        )
+        process.stdin.write((json.dumps(dict(ack, phase="baseline-boot")) + "\n").encode())
+        process.stdin.flush()
+        event = read_event(process)
     validate_event(request, event, "ready")
     observations.pop("boot_id")
     return event, observations
 
 
-def dispatch(requests, mode, known_hosts):
+def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False):
     argv = host_ssh(requests[0]["host"])
     try:
         with subprocess.Popen(
@@ -486,18 +528,48 @@ def dispatch(requests, mode, known_hosts):
         ) as process:
             try:
                 process.stdin.write(
-                    (json.dumps({"requests": requests, "mode": mode}) + "\n").encode()
+                    (
+                        json.dumps(
+                            {
+                                "requests": requests,
+                                "mode": mode,
+                                "confirmed": confirmed,
+                                "exclusive": exclusive,
+                            }
+                        )
+                        + "\n"
+                    ).encode()
                 )
                 process.stdin.flush()
                 outcomes = []
                 for request in requests:
                     event = read_event(process)
-                    validate_event(request, event, "planned" if mode == "plan" else "prepared")
+                    if mode.startswith("plan"):
+                        phase = "planned"
+                    elif mode == "teardown":
+                        phase = "removed"
+                    else:
+                        phase = "prepared"
+                    validate_event(request, event, phase)
                     observations = {}
-                    if mode != "plan":
+                    if phase == "prepared":
                         event, observations = complete_guest(
                             process, request, event, mode, known_hosts
                         )
+                    require(
+                        event["action"]
+                        in {
+                            "plan": {"preserved", "would-create"},
+                            "plan-restore": {"would-restore"},
+                            "plan-teardown": {"would-destroy", "absent"},
+                            "apply": {"created", "preserved"},
+                            "verify": {"preserved"},
+                            "restore": {"restored"},
+                            "teardown": {"destroyed", "absent"},
+                        }[mode],
+                        "Native guest",
+                        "action does not match requested operation",
+                    )
                     outcomes.append(
                         {k: v for k, v in event.items() if k not in {"vmid", "phase"}}
                         | {
@@ -536,11 +608,25 @@ def main():
     )
     parser.add_argument("--targets", default=os.environ.get("TARGETS"))
     parser.add_argument("--apply", action="store_true", default=os.environ.get("APPLY") == "1")
-    parser.add_argument("--verify", action="store_true")
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument("--verify", action="store_true")
+    operation.add_argument("--restore", action="store_true")
+    operation.add_argument("--teardown", action="store_true")
+    parser.add_argument("--confirm", default=os.environ.get("CONFIRM"))
+    parser.add_argument(
+        "--exclusive", action="store_true", default=os.environ.get("EXCLUSIVE") == "1"
+    )
     args = parser.parse_args()
     try:
         require(args.targets is not None, "targets", "select explicit comma-separated aliases")
         require(not args.apply or not args.verify, "operation", "verify does not accept apply")
+        destructive = args.restore or args.teardown
+        require(
+            not (destructive and args.apply) or args.confirm == args.targets and args.exclusive,
+            "operation",
+            "restore/teardown apply requires CONFIRM matching exact TARGETS "
+            "and EXCLUSIVE=1 after consumer release",
+        )
         data = load_inventory(args.inventory)
         validate_inventory(data, args.targets)
         hosts = managed_hosts(data)
@@ -564,13 +650,25 @@ def main():
                 )
             )
             groups.setdefault(key, []).append(request_for(host, revision, source))
-        mode = "verify" if args.verify else "apply" if args.apply else "plan"
+        selected_mode = "restore" if args.restore else "teardown"
+        if destructive:
+            mode = selected_mode if args.apply else "plan-" + selected_mode
+        elif args.verify:
+            mode = "verify"
+        else:
+            mode = "apply" if args.apply else "plan"
         # Admit every selected host before the first mutating batch; each apply rechecks under lock.
-        if mode == "apply":
+        if mode in {"apply", "restore", "teardown"}:
             for requests in groups.values():
-                dispatch(requests, "plan", pins)
+                dispatch(requests, "plan-" + mode if destructive else "plan", pins)
         for requests in groups.values():
-            for result in dispatch(requests, mode, pins):
+            for result in dispatch(
+                requests,
+                mode,
+                pins,
+                confirmed=args.confirm == args.targets,
+                exclusive=args.exclusive,
+            ):
                 print(json.dumps(result, sort_keys=True), flush=True)
     except ValidationError as error:
         print(f"Guest operation failed: {error}", file=sys.stderr)

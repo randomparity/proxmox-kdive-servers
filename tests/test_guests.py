@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import errno
 import io
 import itertools
 import json
@@ -523,6 +524,39 @@ class TestGuestVerifier(unittest.TestCase):
             with self.assertRaises(OSError):
                 guest_verify.crash_reservation()
 
+    def test_crash_reservation_waits_for_kexec_lock(self):
+        with (
+            patch.object(
+                guest_verify.Path,
+                "read_text",
+                side_effect=[OSError(errno.EBUSY, "busy"), "268435456\n"],
+            ) as read,
+            patch.object(guest_verify.time, "monotonic", return_value=0),
+            patch.object(guest_verify.time, "sleep"),
+        ):
+            self.assertEqual(guest_verify.crash_reservation(), 268435456)
+            self.assertEqual(read.call_count, 2)
+
+    def test_crash_reservation_busy_deadline_and_other_errors(self):
+        with (
+            patch.object(guest_verify.Path, "read_text", side_effect=OSError(errno.EBUSY, "busy")),
+            patch.object(guest_verify.time, "monotonic", side_effect=[0, 30]),
+            patch.object(guest_verify.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(guest_verify.GuestError, "reservation.*timed out"):
+                guest_verify.crash_reservation()
+            sleep.assert_not_called()
+        for code in (errno.EIO, errno.EACCES):
+            with (
+                self.subTest(code=code),
+                patch.object(guest_verify.Path, "read_text", side_effect=OSError(code, "failed")),
+                patch.object(guest_verify.time, "sleep") as sleep,
+            ):
+                with self.assertRaises(OSError) as raised:
+                    guest_verify.crash_reservation()
+                self.assertEqual(raised.exception.errno, code)
+                sleep.assert_not_called()
+
     def test_kvm_descriptors_close_on_success_and_failure(self):
         with (
             patch.object(guest_verify.os, "open", return_value=11),
@@ -881,9 +915,48 @@ class GuestNativeFixture:
         self.calls = []
         self.fail_clone = False
         self.destination_extent = 0
+        self.snapshots = {}
+        self.disk_state = {}
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
+        if argv[:2] in (
+            ["qm", "snapshot"],
+            ["qm", "rollback"],
+            ["qm", "shutdown"],
+            ["qm", "destroy"],
+        ):
+            vmid = int(argv[2])
+            guest = self.guests[vmid]
+            if argv[1] == "shutdown":
+                guest["status"] = "stopped"
+            elif argv[1] == "snapshot":
+                self.snapshots.setdefault(vmid, {})[argv[3]] = {
+                    "config": {
+                        k: v
+                        for k, v in guest["config"].items()
+                        if k not in {"digest", "description"}
+                    },
+                    "description": argv[argv.index("--description") + 1],
+                    "snaptime": 123456,
+                    "vmstate": 0,
+                    "disk_state": copy.deepcopy(self.disk_state.get(vmid, {})),
+                }
+                guest["config"]["parent"] = argv[3]
+            elif argv[1] == "rollback":
+                snap = self.snapshots[vmid][argv[3]]
+                guest["config"] = copy.deepcopy(snap["config"]) | {
+                    "description": guest["config"]["description"],
+                    "digest": "a" * 40,
+                    "parent": argv[3],
+                    "vmgenid": "12345678-1234-1234-1234-123456789abc",
+                }
+                self.disk_state[vmid] = copy.deepcopy(snap["disk_state"])
+            else:
+                del self.guests[vmid]
+                self.snapshots.pop(vmid, None)
+                self.volumes = [v for v in self.volumes if v["vmid"] != vmid]
+            return ""
         if argv[0] == "vgs":
             return self.template(argv, **kwargs)
         if argv[0] == "pvesh":
@@ -985,6 +1058,27 @@ class GuestNativeFixture:
             prefix = f"/nodes/{self.template.node}/qemu/{vmid}/"
             if path.startswith(prefix):
                 kind = path.removeprefix(prefix)
+                if kind == "snapshot":
+                    return json.dumps(
+                        [
+                            {
+                                "name": name,
+                                **{
+                                    k: v
+                                    for k, v in snap.items()
+                                    if k not in {"config", "disk_state"}
+                                },
+                            }
+                            for name, snap in self.snapshots.get(vmid, {}).items()
+                        ]
+                        + [{"name": "current"}]
+                    )
+                if kind.startswith("snapshot/") and kind.endswith("/config"):
+                    snap = self.snapshots[vmid][kind.split("/")[1]]
+                    return json.dumps(
+                        snap["config"]
+                        | {"description": snap["description"], "snaptime": snap["snaptime"]}
+                    )
                 return json.dumps(
                     {
                         "config": guest["config"],
@@ -1049,16 +1143,21 @@ class TestNativeLifecycle(unittest.TestCase):
         self.fixture.calls.clear()
 
     def execute(self, mode, ack=None):
-        if ack is None:
-            ack = {
+        output = io.StringIO()
+
+        def acknowledge(timeout):
+            if ack is not None:
+                return ack
+            event = json.loads(output.getvalue().splitlines()[-1])
+            return {
                 "vmid": 1101,
                 "identity": guest_host.identity(self.req),
                 "verified": True,
-                "phase": "prepared",
+                "phase": "post-reboot" if event["phase"] == "reboot" else event["phase"],
             }
-        output = io.StringIO()
+
         with (
-            patch.object(guest_host, "read_line", return_value=ack),
+            patch.object(guest_host, "read_line", side_effect=acknowledge),
             contextlib.redirect_stdout(output),
         ):
             guest_host.session([self.req], mode)
@@ -1130,6 +1229,7 @@ class TestNativeLifecycle(unittest.TestCase):
         for source_vlan, guest_vlan in itertools.product((None, 30), (None, 25)):
             with self.subTest(source=source_vlan, guest=guest_vlan):
                 self.fixture.guests.clear()
+                self.fixture.snapshots.clear()
                 self.fixture.volumes.clear()
                 self.fixture.template.config = copy.deepcopy(initial)
                 self.req["host"].pop("vlan", None)
@@ -1258,6 +1358,7 @@ class TestNativeLifecycle(unittest.TestCase):
                 self.execute("apply")
                 self.execute("verify")
                 self.fixture.guests.clear()
+                self.fixture.snapshots.clear()
                 self.fixture.volumes.clear()
                 self.fixture.calls.clear()
                 capacity["avail"] = 32 * 1024**3 + 2 * 16 * 1024**2 - 1
@@ -1306,7 +1407,23 @@ class TestNativeLifecycle(unittest.TestCase):
         self.assertEqual(events[-1]["action"], "created")
         self.assertTrue(self.fixture.guests[1101]["config"]["description"].endswith(":ready"))
         writes = [c[1] for c in self.fixture.calls if c[0] == "qm"]
-        self.assertEqual(writes, ["clone", "set", "resize", "set", "set", "start", "agent", "set"])
+        self.assertEqual(
+            writes,
+            [
+                "clone",
+                "set",
+                "resize",
+                "set",
+                "set",
+                "start",
+                "agent",
+                "set",
+                "shutdown",
+                "snapshot",
+                "start",
+                "agent",
+            ],
+        )
         self.fixture.calls.clear()
         self.assertEqual(self.execute("apply")[-1]["action"], "preserved")
         self.assertEqual([c[1] for c in self.fixture.calls if c[0] == "qm"], ["agent"])
@@ -1354,6 +1471,7 @@ class TestNativeLifecycle(unittest.TestCase):
         for invalid in ("foreign", "root_disk", "oversized", "pending"):
             with self.subTest(invalid=invalid):
                 self.fixture.guests.clear()
+                self.fixture.snapshots.clear()
                 self.fixture.volumes.clear()
                 self.fixture.calls.clear()
 
@@ -1420,7 +1538,10 @@ class TestNativeLifecycle(unittest.TestCase):
             "verified": True,
             "phase": "prepared",
         }
-        os.write(writer, (json.dumps(ack) + "\n").encode())
+        os.write(
+            writer,
+            (json.dumps(ack) + "\n" + json.dumps(dict(ack, phase="baseline-boot")) + "\n").encode(),
+        )
         os.close(writer)
         read_line = guest_host.read_line
         with os.fdopen(reader, "rb", buffering=0) as stream:
@@ -1680,7 +1801,14 @@ class TestRebootExchange(unittest.TestCase):
             action="created",
             config_sha256="a" * 64,
             duration_seconds=1,
+            snapshot="clean",
+            snapshot_identity="b" * 64,
+            snapshot_config_sha256="c" * 64,
+            snapshot_time=123456,
         )
+        baseline_boot = {k: v for k, v in prepared.items() if k != "fresh"} | {
+            "phase": "baseline-boot"
+        }
         if fault == "uuid":
             reboot["guest_uuid"] = new
         if fault == "missing":
@@ -1693,7 +1821,10 @@ class TestRebootExchange(unittest.TestCase):
             + ",flush=True);assert json.loads(sys.stdin.readline())['phase'] == 'prepared';print("
             + repr(json.dumps(reboot))
             + ",flush=True);assert json.loads(sys.stdin.readline())['phase'] == "
-            "'post-reboot';print(" + repr(json.dumps(ready)) + ",flush=True)"
+            "'post-reboot';print("
+            + repr(json.dumps(baseline_boot))
+            + ",flush=True);assert json.loads(sys.stdin.readline())['phase'] == "
+            "'baseline-boot';print(" + repr(json.dumps(ready)) + ",flush=True)"
         )
         boot, effects = old, []
 
@@ -1701,6 +1832,8 @@ class TestRebootExchange(unittest.TestCase):
             nonlocal boot
             output = ""
             if argv[-1] == "cat /proc/sys/kernel/random/boot_id":
+                if effects == ["prepare", "reboot", "verify"]:
+                    boot = "12345678-1234-1234-1234-123456789abf"
                 output = boot
             elif argv[-1] != "true":
                 envelope = json.loads(kwargs["input"])
@@ -1787,7 +1920,7 @@ class TestRebootExchange(unittest.TestCase):
                     )
                     return
                 outcomes = guests.dispatch([req], "apply", pins)
-        self.assertEqual(effects, ["prepare", "reboot", "verify"])
+        self.assertEqual(effects, ["prepare", "reboot", "verify", "verify"])
         self.assertNotIn("boot_id", outcomes[0])
         self.assertNotIn("guest_uuid", outcomes[0])
 

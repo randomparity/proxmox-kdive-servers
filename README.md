@@ -3,8 +3,8 @@
 This repository prepares clean Linux VMs for
 [KDIVE validation](https://github.com/randomparity/kdive/issues/2803).
 It provides offline inventory checks, verified Proxmox templates, and full-clone
-guests with a verified nested-KVM baseline for four Linux families. Snapshot lifecycle
-and KDIVE installation follow separately.
+guests with verified nested KVM and fresh clean snapshots for four Linux families.
+Selected restore and teardown reset managed VM state; KDIVE installation remains separate.
 
 ## Quick start: build all four VMs
 
@@ -65,7 +65,8 @@ make verify
 
 Plans perform live admission checks; apply repeats admission before creation.
 Provisioning verifies each guest's boot, networking, sizing, security enforcement
-and nested-KVM baseline. `make verify` repeats verification without provisioning.
+and nested-KVM baseline, captures a no-RAM `clean` snapshot, then boots and verifies again.
+`make verify` repeats verification without provisioning.
 These commands prepare the VMs; KDIVE installation is a separate step.
 
 **Capacity:** the example requests 32 vCPUs, 128 GiB RAM and 1 TiB of guest root
@@ -208,7 +209,7 @@ of resizing or re-marking it. Preserve the original inventory for existing guest
 Use operator-assigned unused VM IDs and network identities for replacement guests,
 or arrange explicitly authorized teardown/recreation of the old disposable guests.
 Templates retain their small, unbooted hardware configuration; clone sizing is
-independent. Clean snapshot/restore support remains owned by issue #5.
+independent. Use the [clean snapshot lifecycle](#clean-snapshot-lifecycle) for explicit restore or recreation.
 
 Credential names are checked without reading their environment values. There is no
 need to set them for offline checks. Recognizable plaintext API credentials and
@@ -321,8 +322,8 @@ No security enforcement or package state is changed to manufacture import succes
 
 Import/rerun proof establishes template identity and storage eligibility. Guest
 provisioning below establishes boot, networking, cloud-init and nested KVM.
-[Issue #5](https://github.com/randomparity/proxmox-kdive-servers/issues/5) owns clean
-snapshots, restore, test-use coordination and scoped teardown, consuming this identity.
+The [clean snapshot lifecycle](#clean-snapshot-lifecycle) consumes this identity for fresh
+capture, selected restore and scoped teardown.
 KDIVE owns installation, libvirt/build/debug tools, runners, workload qualification
 and external test state. The operator owns host module/reboot and network changes.
 
@@ -440,8 +441,9 @@ Matching ready reruns perform verification only: they do not restart a stopped
 guest, update packages/keys, resize disks or clear test state. Drift, extra disks,
 pending native changes, foreign ownership and preparing-phase objects fail for
 inspection. Failed work retains inspectable resources; there is no automatic
-delete, resume, repair or recreate command. Ready does not mean test state is clean.
-Issue #5 owns clean snapshots and restoration without blessing a used VM as clean.
+delete, resume or repair. Ready does not mean current test state is clean. A missing or
+stale `clean` snapshot fails rather than blessing a used VM; explicitly selected teardown
+and fresh provisioning is the recreation path.
 
 The equivalent Ansible entrypoints use the same controller operation:
 
@@ -465,3 +467,76 @@ restore/teardown, and collect external test results/artifacts before release.
 Coordinate this explicitly; this repository does not supply a scheduler. Keep
 private inventory and SSH pins after worktree cleanup because they identify access
 to persistent VMs. Sanitized reports may be shared; raw native/guest logs may not.
+
+
+## Clean snapshot lifecycle
+
+Fresh provisioning captures `clean` only after management preparation and baseline verification.
+It gracefully shuts down, snapshots guest-writable root and EFI disks without RAM, boots, and
+repeats strict SSH, OS/configuration, sizing, guest-agent, security-enforcement and KVM checks.
+The cloud-init CD-ROM is guest-read-only: its volume reference and generating configuration are
+bound, while native snapshotting skips its contents. Additional disks and unsupported storage
+fail admission. The snapshot binds the existing image/guest identity and a stable native
+configuration fingerprint; native generation-ID rotation on rollback is expected, while SMBIOS
+identity remains bound. Output includes snapshot name, identity, configuration hash and timestamp.
+
+Ordinary provision/verify reruns neither replace the snapshot nor reset current guest files.
+Missing, stale, partial, RAM-state or mismatched snapshots fail. There is no command to capture
+an already-used guest as clean. Do not manually rename another snapshot to `clean`: its metadata
+will not satisfy the fresh baseline contract.
+
+Restore and teardown default to read-only live plans. Select exact aliases; collect test results,
+release external services/artifacts, and stop other consumers before applying. `EXCLUSIVE=1`
+attests that release; cooperative locks serialize these tools but cannot fence a different
+operator or application writing to the VM. KDIVE owns external state and result collection.
+
+```sh
+export INVENTORY=inventory/private/lab.yml
+export TARGETS=ubuntu
+unset APPLY CONFIRM EXCLUSIVE
+make restore
+# After reviewing the selected plan and releasing the consumer:
+make restore APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1
+```
+
+Restore verifies the existing baseline before stopping a running guest, rolls back without RAM,
+boots, and rechecks the full read-only baseline. It also accepts an already-stopped guest. The
+`CONFIRM` value must match `TARGETS` exactly, including order; wildcards/empty/duplicate/unknown
+aliases fail. A mismatch fails before API/SSH access.
+
+Teardown permanently removes only selected owned VMs and their inspected snapshots/disks. It
+preserves shared templates and unselected VMs. It accepts a complete matching older owned guest
+without `clean`, enabling intentional replacement; absent selected guests are an unchanged result.
+Foreign ownership, changed configuration, unknown disks or snapshot references, incomplete
+allocations and native task locks require inspection instead of broader deletion.
+
+```sh
+make teardown
+# This deletes the selected VM and its existing snapshots permanently:
+make teardown APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1
+# Recreate a verified fresh guest and clean baseline after reviewing SSH pins:
+make provision
+make provision APPLY=1
+```
+
+Recreation changes guest SSH keys. Preserve the private inventory/pin file, confirm the old
+selected VM was removed, then remove only its obsolete address entry from that private
+`known_hosts` using your trusted SSH administration process. The tools never replace pins or
+disable host-key checking. Fresh first contact still requires a trusted lab network.
+
+Equivalent separate playbooks retain protected private parsing/output:
+
+```sh
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
+  .venv/bin/ansible-playbook -i localhost, playbooks/restore.yml
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1 \
+  .venv/bin/ansible-playbook -i localhost, playbooks/teardown.yml
+```
+
+Commands await native task completion. Shutdown gets 180 seconds with no forced-stop fallback;
+snapshot, rollback and deletion get 1800 seconds; startup SSH gets 600 seconds. An error or
+transport timeout is not success or permission to retry: inspect native task/configuration state
+privately first. A task may outlive its disconnected controller. Never clear its lock to bypass
+inspection. Failed work retains its observed state; complete owned guests can be explicitly
+torn down after tasks finish, while incomplete/ambiguous allocations need manual recovery.
+Snapshots cover VM state only, not external services, DNS, backups or test artifact storage.
