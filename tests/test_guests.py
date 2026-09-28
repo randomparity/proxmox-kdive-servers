@@ -1716,7 +1716,10 @@ class TestRebootExchange(unittest.TestCase):
                         return subprocess.CompletedProcess(argv, 255, "{", "disconnected")
                     if fault == "ack-disconnect":
                         return subprocess.CompletedProcess(
-                            argv, 255, json.dumps({"reboot_requested": True}), ""
+                            argv,
+                            255,
+                            json.dumps({"reboot_requested": True}),
+                            "Connection to guest closed by remote host.\n",
                         )
                     output = (
                         "null" if fault == "invalid-ack" else json.dumps({"reboot_requested": True})

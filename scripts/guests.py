@@ -170,7 +170,7 @@ def guest_rpc(request, known_hosts, envelope, timeout):
     require(
         (result.returncode == 0 or reboot_disconnect)
         and len(result.stdout) <= 65536
-        and not result.stderr.strip(),
+        and (reboot_disconnect or not result.stderr.strip()),
         "Guest baseline",
         "operation failed; inspect private guest state",
     )
