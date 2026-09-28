@@ -853,7 +853,8 @@ def prepare_toolchain(request):
         ["usermod", "--append", "--groups", "docker,kvm,libvirt", user], "operator groups"
     )
     units = toolchain_command(
-        ["systemctl", "list-unit-files", "virtqemud.socket", "--no-legend"], "libvirt units"
+        ["systemctl", "list-unit-files", "virtqemud.socket", "libvirtd.service", "--no-legend"],
+        "libvirt units",
     )
     libvirt = (
         [

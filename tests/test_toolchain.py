@@ -184,6 +184,32 @@ class ToolchainTests(unittest.TestCase):
                 with self.subTest(tool=missing), self.assertRaises(g.GuestError):
                     g.toolchain_observation(request)
 
+    def test_monolithic_libvirt_absence_is_not_a_command_failure(self):
+        commands = []
+
+        def run(argv, timeout=60):
+            commands.append(argv)
+            if argv[:2] == ["systemctl", "list-unit-files"]:
+                if "libvirtd.service" not in argv:
+                    raise g.GuestError("no matching unit files")
+                return "libvirtd.service enabled enabled"
+            return ""
+
+        request = {"host": {"profile": "ubuntu", "ansible_user": "operator"}}
+        with (
+            patch.object(g, "command", side_effect=run),
+            patch.object(g.pwd, "getpwnam"),
+            patch.object(g, "toolchain_source_path"),
+            patch.object(
+                g, "prepare_operator_tools", side_effect=RuntimeError("services prepared")
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "services prepared"):
+                g.prepare_toolchain(request)
+        self.assertIn(
+            ["systemctl", "enable", "--now", "docker.service", "libvirtd.service"], commands
+        )
+
     def test_docker_key_fingerprint_exact(self):
         valid = "fpr:::::::::060A61C51B558A7F742B77AAC52FEB6B621E9F35:\n"
         g.check_docker_key(valid)
