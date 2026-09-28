@@ -377,10 +377,12 @@ def host_ssh(host):
     return argv + ["--", host["proxmox_ssh_host"], "python3 -u -c " + shlex.quote(host_source())]
 
 
-def validate_event(request, event, phase):
+def validate_event(request, event, phase, level="clean"):
     keys = {"vmid", "identity", "phase"} | {
         "planned": {"action"},
         "prepared": {"fresh", "guest_uuid"},
+        "levels": {"guest_uuid", "level", "prepare", "chain", "proposed"},
+        "snapshot-ready": {"level", "metadata"},
         "reboot": {"guest_uuid"},
         "baseline-boot": {"guest_uuid"},
         "removed": {"action", "duration_seconds"},
@@ -404,6 +406,9 @@ def validate_event(request, event, phase):
         "Native guest",
         "result identity/shape mismatch; inspect selected resources",
     )
+    if phase in {"levels", "snapshot-ready"}:
+        validate_level_event(request, event, level)
+        return
     if phase == "prepared":
         require(type(event["fresh"]) is bool, "Native guest", "invalid preparation phase")
         guest_verify.machine_uuid(event["guest_uuid"])
@@ -411,7 +416,14 @@ def validate_event(request, event, phase):
         guest_verify.machine_uuid(event["guest_uuid"])
     else:
         allowed = {
-            "planned": {"preserved", "would-create", "would-restore", "would-destroy", "absent"},
+            "planned": {
+                "preserved",
+                "would-create",
+                "would-restore",
+                "would-destroy",
+                "absent",
+                "would-prepare-level",
+            },
             "ready": {"preserved", "created", "restored"},
             "removed": {"destroyed", "absent"},
         }[phase]
@@ -426,7 +438,7 @@ def validate_event(request, event, phase):
         )
     if phase == "ready":
         require(
-            event["snapshot"] == "clean"
+            event["snapshot"] == level
             and type(event["snapshot_time"]) is int
             and event["snapshot_time"] > 0
             and all(
@@ -473,7 +485,109 @@ def read_event(process):
     return event
 
 
-def complete_guest(process, request, event, mode, known_hosts):
+def complete_level(process, request, event, mode, known_hosts, level, guest_uuid):
+    validate_event(request, event, "levels", level)
+    require(
+        event["guest_uuid"] == guest_uuid and event["prepare"] == (mode == "level"),
+        "Native level",
+        "operation/guest mismatch",
+    )
+    operation = "prepare" if mode == "level" else "verify"
+    response = guest_rpc(
+        dict(request, guest_uuid=guest_uuid),
+        known_hosts,
+        {
+            "level_operation": operation,
+            "level": level,
+            "chain": event["chain"],
+            "proposed": event["proposed"],
+        },
+        1800,
+    )
+    ack = {
+        "vmid": request["host"]["vmid"],
+        "identity": guest_host.identity(request),
+        "verified": True,
+        "phase": "levels",
+    }
+    if mode == "level":
+        require(
+            isinstance(response, dict) and set(response) == {"metadata"},
+            "Guest level",
+            "invalid prepared metadata result",
+        )
+        guest_verify.level_metadata(
+            response["metadata"],
+            level,
+            event["chain"][-1],
+            ack["identity"],
+            event["chain"][0]["config_sha256"],
+        )
+        ack["metadata"] = response["metadata"]
+    else:
+        require(response == {"verified": True}, "Guest level", "invalid verification result")
+    process.stdin.write((json.dumps(ack) + "\n").encode())
+    process.stdin.flush()
+    result = read_event(process)
+    if mode == "level":
+        validate_event(request, result, "snapshot-ready", level)
+        require(
+            result["metadata"] == response["metadata"],
+            "Native level",
+            "READY metadata differs from verified guest",
+        )
+    return result
+
+
+def validate_level_event(request, event, level):
+    entries = guest_verify.level_chain(level)
+    require(entries and event["level"] == level, "Native level", "unexpected selected level")
+    if event["phase"] == "snapshot-ready":
+        metadata = event["metadata"]
+        require(
+            isinstance(metadata, dict) and metadata.get("level") == level,
+            "Native level",
+            "invalid snapshot metadata",
+        )
+        return
+    guest_verify.machine_uuid(event["guest_uuid"])
+    require(
+        type(event["prepare"]) is bool and isinstance(event["chain"], list),
+        "Native level",
+        "invalid level operation",
+    )
+    chain = event["chain"]
+    require(len(chain) == len(entries) + (not event["prepare"]), "Native level", "incomplete chain")
+    clean = chain[0]
+    require(
+        isinstance(clean, dict)
+        and set(clean) == {"schema", "identity", "config_sha256"}
+        and type(clean["schema"]) is int
+        and clean["schema"] == 1
+        and clean["identity"] == guest_host.identity(request)
+        and isinstance(clean["config_sha256"], str)
+        and re.fullmatch(r"[a-f0-9]{64}", clean["config_sha256"]),
+        "Native level",
+        "invalid clean metadata",
+    )
+    for index, metadata in enumerate(chain[1:]):
+        guest_verify.level_metadata(
+            metadata,
+            entries[index]["name"],
+            chain[index],
+            clean["identity"],
+            clean["config_sha256"],
+        )
+    if event["prepare"]:
+        guest_verify.level_metadata(
+            event["proposed"], level, chain[-1], clean["identity"], clean["config_sha256"]
+        )
+        require(event["proposed"]["content"] == {}, "Native level", "unexpected proposed content")
+    else:
+        require(event["proposed"] is None, "Native level", "unexpected proposed metadata")
+
+
+def complete_guest(process, request, event, mode, known_hosts, level="clean"):
     require(not event["fresh"] or mode == "apply", "Native guest", "unexpected mutation")
     guest_uuid, fresh = event["guest_uuid"], event["fresh"]
     observations = verify_guest(request, known_hosts, fresh, guest_uuid, booting=mode == "restore")
@@ -511,12 +625,15 @@ def complete_guest(process, request, event, mode, known_hosts):
         process.stdin.write((json.dumps(dict(ack, phase="baseline-boot")) + "\n").encode())
         process.stdin.flush()
         event = read_event(process)
-    validate_event(request, event, "ready")
+    if level != "clean":
+        event = complete_level(process, request, event, mode, known_hosts, level, guest_uuid)
+    if mode != "level":
+        validate_event(request, event, "ready", level)
     observations.pop("boot_id")
     return event, observations
 
 
-def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False):
+def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False, level="clean"):
     argv = host_ssh(requests[0]["host"])
     try:
         with subprocess.Popen(
@@ -535,6 +652,7 @@ def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False):
                                 "mode": mode,
                                 "confirmed": confirmed,
                                 "exclusive": exclusive,
+                                "level": level,
                             }
                         )
                         + "\n"
@@ -554,13 +672,17 @@ def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False):
                     observations = {}
                     if phase == "prepared":
                         event, observations = complete_guest(
-                            process, request, event, mode, known_hosts
+                            process, request, event, mode, known_hosts, level
                         )
+                    if mode == "level":
+                        outcomes.append({"level": level, "metadata": event["metadata"]})
+                        continue
                     require(
                         event["action"]
                         in {
                             "plan": {"preserved", "would-create"},
                             "plan-restore": {"would-restore"},
+                            "plan-level": {"would-prepare-level"},
                             "plan-teardown": {"would-destroy", "absent"},
                             "apply": {"created", "preserved"},
                             "verify": {"preserved"},
@@ -612,6 +734,8 @@ def main():
     operation.add_argument("--verify", action="store_true")
     operation.add_argument("--restore", action="store_true")
     operation.add_argument("--teardown", action="store_true")
+    operation.add_argument("--prepare-level", action="store_true")
+    parser.add_argument("--level", default=os.environ.get("LEVEL", "clean"))
     parser.add_argument("--confirm", default=os.environ.get("CONFIRM"))
     parser.add_argument(
         "--exclusive", action="store_true", default=os.environ.get("EXCLUSIVE") == "1"
@@ -620,11 +744,22 @@ def main():
     try:
         require(args.targets is not None, "targets", "select explicit comma-separated aliases")
         require(not args.apply or not args.verify, "operation", "verify does not accept apply")
-        destructive = args.restore or args.teardown
+        guest_verify.level_chain(args.level)
+        require(
+            args.level == "clean" or args.verify or args.restore or args.prepare_level,
+            "level",
+            "LEVEL only applies to verify, restore and level",
+        )
+        require(
+            not args.prepare_level or args.level != "clean",
+            "level",
+            "select an implemented non-clean level",
+        )
+        destructive = args.restore or args.teardown or args.prepare_level
         require(
             not (destructive and args.apply) or args.confirm == args.targets and args.exclusive,
             "operation",
-            "restore/teardown apply requires CONFIRM matching exact TARGETS "
+            "restore/teardown/level apply requires CONFIRM matching exact TARGETS "
             "and EXCLUSIVE=1 after consumer release",
         )
         data = load_inventory(args.inventory)
@@ -650,7 +785,7 @@ def main():
                 )
             )
             groups.setdefault(key, []).append(request_for(host, revision, source))
-        selected_mode = "restore" if args.restore else "teardown"
+        selected_mode = "level" if args.prepare_level else "restore" if args.restore else "teardown"
         if destructive:
             mode = selected_mode if args.apply else "plan-" + selected_mode
         elif args.verify:
@@ -658,19 +793,33 @@ def main():
         else:
             mode = "apply" if args.apply else "plan"
         # Admit every selected host before the first mutating batch; each apply rechecks under lock.
-        if mode in {"apply", "restore", "teardown"}:
+        if mode in {"apply", "restore", "teardown", "level"}:
             for requests in groups.values():
-                dispatch(requests, "plan-" + mode if destructive else "plan", pins)
+                dispatch(
+                    requests, "plan-" + mode if destructive else "plan", pins, level=args.level
+                )
         for requests in groups.values():
-            for result in dispatch(
-                requests,
-                mode,
-                pins,
-                confirmed=args.confirm == args.targets,
-                exclusive=args.exclusive,
+            for index, result in enumerate(
+                dispatch(
+                    requests,
+                    mode,
+                    pins,
+                    confirmed=args.confirm == args.targets,
+                    exclusive=args.exclusive,
+                    level=args.level,
+                )
             ):
-                print(json.dumps(result, sort_keys=True), flush=True)
-    except ValidationError as error:
+                if mode == "level":
+                    alias = next(
+                        a
+                        for a in args.targets.split(",")
+                        if hosts[a]["vmid"] == requests[index]["host"]["vmid"]
+                    )
+                    print(f"READY TO SNAPSHOT {args.level} for {alias}", flush=True)
+                    print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
+                else:
+                    print(json.dumps(result, sort_keys=True), flush=True)
+    except (ValidationError, guest_verify.GuestError) as error:
         print(f"Guest operation failed: {error}", file=sys.stderr)
         return 1
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):

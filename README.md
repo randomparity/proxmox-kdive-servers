@@ -540,3 +540,41 @@ privately first. A task may outlive its disconnected controller. Never clear its
 inspection. Failed work retains its observed state; complete owned guests can be explicitly
 torn down after tasks finish, while incomplete/ambiguous allocations need manual recovery.
 Snapshots cover VM state only, not external services, DNS, backups or test artifact storage.
+
+## Operator-captured levels
+
+The level contract supports an ordered, closed registry above `clean`. This revision adds the
+contract and tests, **no production higher levels**: `clean` remains the only selectable verify
+or restore level, and `make level` rejects it. Each subsequent level implementation supplies its
+name, parent, preparation hook and read-only content check. There is no configurable plugin
+loader or test-level switch.
+
+`LEVEL` defaults to `clean` for `make verify` and `make restore`. Existing clean metadata and
+successful output stay unchanged. A higher level binds its exact native configuration, guest
+identity, declared parent, digest of the parent's complete metadata, and recorded content.
+Verification walks every ancestor, rejects RAM/incomplete snapshots, compares Proxmox ancestry,
+checks root-owned 0644 manifests in `/var/lib/kdive-levels/`, and runs each guest check hook.
+Recorded pins describe the snapshot; changing configured pins does not silently invalidate it.
+Replacing a parent's metadata invalidates descendants and requires re-preparation.
+
+For an installed higher level, `make level LEVEL=<registered-name> TARGETS=<alias>` produces a
+read-only plan. Applying that reviewed plan requires `APPLY=1`, `CONFIRM` exactly matching
+`TARGETS`, and `EXCLUSIVE=1` after consumers release the guest. The running guest must verify
+at its parent, its native current parent must match, and the target snapshot must not exist.
+Preparation verifies content and its manifest, then gracefully shuts down with no force-stop
+fallback. Only after stopped-state validation does it print `READY TO SNAPSHOT <level> for
+<alias>` and one JSON line containing the exact `level` name and `metadata` object.
+
+The operator then captures a no-RAM snapshot using that exact name and the compact JSON
+serialization of `metadata` as its description, through the Proxmox UI or `qm snapshot` with
+`--vmstate 0 --description '<metadata JSON>'`. Start the guest before `make verify LEVEL=<name>`.
+The tool never creates, renames or deletes higher-level snapshots. A failed preparation leaves
+inspectable state and emits no READY; inspect it and restore the parent before another attempt.
+The current parent plus content checks prove the declared contract, not every unrelated disk byte.
+
+Restore admits native chain metadata before stopping or rolling back, so a stopped guest or a
+guest with damaged disk contents can recover. After rollback it boots and checks guest content.
+On ZFS storage, newer snapshots block rollback to a lower level, including `clean`; admission
+fails before shutdown and asks the operator to inspect/remove newer snapshots. It never removes
+them automatically. The same check applies to the read-only restore plan. Cooperative locks and
+`EXCLUSIVE` cannot fence a separate privileged operator changing snapshots outside this tool.
