@@ -593,38 +593,52 @@ DOCKER_REPOSITORY = (
 )
 
 
-TOOLCHAIN_DIAGNOSTICS = {
-    f"Toolchain operator {tool} failed; inspect guest prerequisites and re-prepare": (
-        f"Toolchain {tool} unavailable for operator; restore toolchain or re-prepare"
-    )
-    for tool in (
-        "bash",
-        "id",
-        "git",
-        "curl",
-        "gcc",
-        "make",
-        "pkg-config",
-        "python3",
-        "shellcheck",
-        "shfmt",
-        "realpath",
-        "find",
-        "grep",
-        "uv",
-        "just",
-        "docker",
-        "virsh",
-        "/usr/bin/qemu-system-x86_64",
-        "/usr/bin/qemu-kvm",
-        "/usr/libexec/qemu-kvm",
-    )
-} | {
-    f"Toolchain operator missing {group} group; re-prepare": (
-        f"Toolchain operator missing {group} group; restore toolchain or re-prepare"
-    )
-    for group in ("docker", "kvm", "libvirt")
-}
+TOOLCHAIN_DIAGNOSTICS = (
+    {
+        f"Toolchain operator {tool} failed; inspect guest prerequisites and re-prepare": (
+            f"Toolchain {tool} unavailable for operator; restore toolchain or re-prepare"
+        )
+        for tool in (
+            "bash",
+            "id",
+            "git",
+            "curl",
+            "gcc",
+            "make",
+            "pkg-config",
+            "python3",
+            "shellcheck",
+            "shfmt",
+            "realpath",
+            "find",
+            "grep",
+            "uv",
+            "just",
+            "docker",
+            "virsh",
+            "/usr/bin/qemu-system-x86_64",
+            "/usr/bin/qemu-kvm",
+            "/usr/libexec/qemu-kvm",
+        )
+    }
+    | {
+        f"Toolchain operator missing {group} group; re-prepare": (
+            f"Toolchain operator missing {group} group; restore toolchain or re-prepare"
+        )
+        for group in ("docker", "kvm", "libvirt")
+    }
+    | {
+        "Toolchain required packages failed; inspect guest prerequisites and re-prepare": (
+            "Toolchain required packages unavailable; restore toolchain or re-prepare"
+        ),
+        "Toolchain required packages missing; re-prepare": (
+            "Toolchain required packages unavailable; restore toolchain or re-prepare"
+        ),
+        "Toolchain QEMU missing; re-prepare": (
+            "Toolchain QEMU unavailable; restore toolchain or re-prepare"
+        ),
+    }
+)
 
 
 def toolchain_packages(profile):

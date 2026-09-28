@@ -254,6 +254,15 @@ class ToolchainTests(unittest.TestCase):
                 with self.assertRaisesRegex(guests.ValidationError, "Guest baseline"):
                     guests.guest_rpc({"host": {}}, Path("unused"), envelope, 60)
 
+    def test_missing_packages_and_qemu_have_fixed_actionable_diagnostics(self):
+        for source in (
+            "Toolchain required packages failed; inspect guest prerequisites and re-prepare",
+            "Toolchain required packages missing; re-prepare",
+            "Toolchain QEMU missing; re-prepare",
+        ):
+            with self.subTest(source=source):
+                self.assertIn("restore toolchain or re-prepare", g.TOOLCHAIN_DIAGNOSTICS[source])
+
     def test_docker_key_fingerprint_exact(self):
         valid = "fpr:::::::::060A61C51B558A7F742B77AAC52FEB6B621E9F35:\n"
         g.check_docker_key(valid)
