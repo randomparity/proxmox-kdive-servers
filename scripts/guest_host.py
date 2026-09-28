@@ -721,8 +721,7 @@ def lifecycle(request, mode):
         command(["qm", "rollback", vmid, "clean", "--start", "0"], timeout=1800)
         baseline(request, inspect_guest(request, running=False))
         command(["qm", "start", vmid], timeout=180)
-        config = verify_readiness(request, fresh=False)
-        return config
+        return verify_readiness(request, fresh=False)
     config, phase = inspect_removable(request)
     volumes = {config[slot].split(",", 1)[0] for slot in ("scsi0", "scsi1", "efidisk0")}
     shutdown_guest(request, config, phase)
@@ -798,10 +797,13 @@ def session(requests, mode, confirmed=False, exclusive=False):
                 config = verify_readiness(request, fresh=not present)
                 if not present:
                     config = capture_baseline(request, config)
+            action = "preserved" if present else "created"
+            if mode == "restore":
+                action = "restored"
             emit(
                 request,
                 "ready",
-                action="restored" if mode == "restore" else "preserved" if present else "created",
+                action=action,
                 config_sha256=template_host.digest(config),
                 duration_seconds=round(time.monotonic() - started, 3),
                 **baseline(request, config),

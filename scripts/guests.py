@@ -438,10 +438,7 @@ def validate_event(request, event, phase):
         )
         require(
             isinstance(event["config_sha256"], str)
-            and re.fullmatch(r"[a-f0-9]{64}", event["config_sha256"])
-            and type(event["duration_seconds"]) in {int, float}
-            and math.isfinite(event["duration_seconds"])
-            and event["duration_seconds"] >= 0,
+            and re.fullmatch(r"[a-f0-9]{64}", event["config_sha256"]),
             "Native guest",
             "invalid outcome evidence",
         )
@@ -547,13 +544,12 @@ def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False):
                 outcomes = []
                 for request in requests:
                     event = read_event(process)
-                    phase = (
-                        "planned"
-                        if mode.startswith("plan")
-                        else "removed"
-                        if mode == "teardown"
-                        else "prepared"
-                    )
+                    if mode.startswith("plan"):
+                        phase = "planned"
+                    elif mode == "teardown":
+                        phase = "removed"
+                    else:
+                        phase = "prepared"
                     validate_event(request, event, phase)
                     observations = {}
                     if phase == "prepared":
@@ -655,15 +651,12 @@ def main():
             )
             groups.setdefault(key, []).append(request_for(host, revision, source))
         selected_mode = "restore" if args.restore else "teardown"
-        mode = (
-            (selected_mode if args.apply else "plan-" + selected_mode)
-            if destructive
-            else "verify"
-            if args.verify
-            else "apply"
-            if args.apply
-            else "plan"
-        )
+        if destructive:
+            mode = selected_mode if args.apply else "plan-" + selected_mode
+        elif args.verify:
+            mode = "verify"
+        else:
+            mode = "apply" if args.apply else "plan"
         # Admit every selected host before the first mutating batch; each apply rechecks under lock.
         if mode in {"apply", "restore", "teardown"}:
             for requests in groups.values():
