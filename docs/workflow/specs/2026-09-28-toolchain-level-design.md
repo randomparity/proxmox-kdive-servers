@@ -30,7 +30,7 @@ Native developer lists follow KDIVE `docs/operating/install.md`:
 | Ubuntu | build-essential pkg-config libvirt-dev python3-dev libelf-dev shellcheck shfmt | libvirt-daemon-system libvirt-clients qemu-system-x86 docker.io docker-compose-v2 |
 | Fedora | gcc make pkgconf-pkg-config libvirt-devel python3-devel elfutils-libelf-devel ShellCheck shfmt | libvirt libvirt-client qemu-kvm moby-engine docker-compose |
 | Rocky | Fedora developer list | libvirt libvirt-client qemu-kvm docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin |
-| openSUSE | gcc make pkg-config libvirt-devel python3-devel libelf-devel ShellCheck shfmt | libvirt-daemon-qemu libvirt-daemon-proxy libvirt-client qemu-x86 docker docker-compose |
+| openSUSE | gcc make pkgconf-pkg-config libvirt-devel python3-devel libelf-devel ShellCheck shfmt | libvirt-daemon-qemu libvirt-daemon-proxy libvirt-client qemu-x86 docker docker-compose |
 
 Install from configured distro repositories, without adding new sources except
 Rocky's approved Docker stable RHEL repository. Verify its signing key against

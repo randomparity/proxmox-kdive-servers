@@ -263,6 +263,16 @@ class ToolchainTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertIn("restore toolchain or re-prepare", g.TOOLCHAIN_DIAGNOSTICS[source])
 
+    def test_opensuse_queries_installed_rpm_name_instead_of_capability(self):
+        def run(argv, timeout=60):
+            if "pkg-config" in argv:
+                raise g.GuestError("package pkg-config is not installed")
+            self.assertIn("pkgconf-pkg-config", argv)
+            return ""
+
+        with patch.object(g, "command", side_effect=run):
+            g.toolchain_check_packages("opensuse")
+
     def test_docker_key_fingerprint_exact(self):
         valid = "fpr:::::::::060A61C51B558A7F742B77AAC52FEB6B621E9F35:\n"
         g.check_docker_key(valid)

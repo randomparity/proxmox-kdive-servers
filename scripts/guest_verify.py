@@ -579,8 +579,9 @@ TOOLCHAIN_PACKAGES = {
     "rocky": "gcc make pkgconf-pkg-config libvirt-devel python3-devel elfutils-libelf-devel "
     "ShellCheck shfmt libvirt libvirt-client qemu-kvm docker-ce docker-ce-cli containerd.io "
     "docker-buildx-plugin docker-compose-plugin",
-    "opensuse": "gcc make pkg-config libvirt-devel python3-devel libelf-devel ShellCheck shfmt "
-    "libvirt-daemon-qemu libvirt-daemon-proxy libvirt-client qemu-x86 docker docker-compose",
+    "opensuse": "gcc make pkgconf-pkg-config libvirt-devel python3-devel libelf-devel "
+    "ShellCheck shfmt libvirt-daemon-qemu libvirt-daemon-proxy libvirt-client qemu-x86 "
+    "docker docker-compose",
 }
 UV_VERSION = "0.12.19"
 JUST_VERSION = "1.58.0"
