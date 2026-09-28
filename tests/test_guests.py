@@ -1516,6 +1516,10 @@ class TestRebootExchange(unittest.TestCase):
                         return subprocess.CompletedProcess(argv, 1, "", "guest error")
                     if fault == "partial":
                         return subprocess.CompletedProcess(argv, 255, "{", "disconnected")
+                    if fault == "ack-disconnect":
+                        return subprocess.CompletedProcess(
+                            argv, 255, json.dumps({"reboot_requested": True}), ""
+                        )
                     output = (
                         "null" if fault == "invalid-ack" else json.dumps({"reboot_requested": True})
                     )
@@ -1573,7 +1577,7 @@ class TestRebootExchange(unittest.TestCase):
                 patch.object(guests.subprocess, "run", side_effect=ssh),
                 patch.object(guests, "wait_guest", side_effect=bounded_wait),
             ):
-                if fault and fault != "disconnect":
+                if fault and fault not in {"disconnect", "ack-disconnect"}:
                     with self.assertRaises(ValueError):
                         guests.dispatch([req], "apply", pins)
                     self.assertEqual(
@@ -1606,13 +1610,20 @@ class TestRebootExchange(unittest.TestCase):
     def test_disconnect_after_single_reboot_requires_full_postboot_proof(self):
         self.exercise_exchange("disconnect")
 
+    def test_acknowledged_reboot_disconnect_requires_full_postboot_proof(self):
+        self.exercise_exchange("ack-disconnect")
+
     def test_disconnect_during_other_rpc_remains_failure(self):
         req = request()
-        with patch.object(
-            guests.subprocess,
-            "run",
-            return_value=subprocess.CompletedProcess([], 255, "", "disconnected"),
-        ):
-            for envelope in ({"fresh": True}, {"fresh": False}):
-                with self.subTest(envelope=envelope), self.assertRaises(ValidationError):
-                    guests.guest_rpc(req, Path("/unused"), envelope, 1)
+        for output in ("", json.dumps({"reboot_requested": True})):
+            with patch.object(
+                guests.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 255, output, ""),
+            ):
+                for envelope in ({"fresh": True}, {"fresh": False}):
+                    with (
+                        self.subTest(envelope=envelope, output=output),
+                        self.assertRaises(ValidationError),
+                    ):
+                        guests.guest_rpc(req, Path("/unused"), envelope, 1)

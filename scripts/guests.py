@@ -168,10 +168,13 @@ def guest_rpc(request, known_hosts, envelope, timeout):
         raise ValidationError(
             "Guest RPC timed out; inspect retained partial without retry"
         ) from None
-    if set(envelope) == {"reboot_from"} and result.returncode == 255 and not result.stdout:
+    reboot_disconnect = set(envelope) == {"reboot_from"} and result.returncode == 255
+    if reboot_disconnect and not result.stdout:
         return REBOOT_DISCONNECTED
     require(
-        result.returncode == 0 and len(result.stdout) <= 65536 and not result.stderr.strip(),
+        (result.returncode == 0 or reboot_disconnect)
+        and len(result.stdout) <= 65536
+        and not result.stderr.strip(),
         "Guest baseline",
         "operation failed; inspect private guest state",
     )
