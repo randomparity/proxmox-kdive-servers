@@ -1,5 +1,6 @@
 """Management-only preparation and reusable Linux guest baseline verification."""
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -402,10 +403,20 @@ def identity_observation():
 
 
 def crash_reservation():
-    try:
-        value = Path("/sys/kernel/kexec_crash_size").read_text().strip()
-    except FileNotFoundError:
-        return 0
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            value = Path("/sys/kernel/kexec_crash_size").read_text().strip()
+            break
+        except FileNotFoundError:
+            return 0
+        except OSError as error:
+            if error.errno != errno.EBUSY:
+                raise
+            # The sysfs read shares the kexec lock with boot-time kdump loading.
+            remaining = deadline - time.monotonic()
+            check(remaining > 0, "Crash memory reservation read timed out; inspect kdump")
+            time.sleep(min(0.25, remaining))
     check(bool(re.fullmatch(r"[0-9]{1,20}", value)), "Invalid native crash memory reservation")
     return int(value)
 

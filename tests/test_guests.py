@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import errno
 import io
 import itertools
 import json
@@ -522,6 +523,39 @@ class TestGuestVerifier(unittest.TestCase):
         with patch.object(guest_verify.Path, "read_text", side_effect=PermissionError):
             with self.assertRaises(OSError):
                 guest_verify.crash_reservation()
+
+    def test_crash_reservation_waits_for_kexec_lock(self):
+        with (
+            patch.object(
+                guest_verify.Path,
+                "read_text",
+                side_effect=[OSError(errno.EBUSY, "busy"), "268435456\n"],
+            ) as read,
+            patch.object(guest_verify.time, "monotonic", return_value=0),
+            patch.object(guest_verify.time, "sleep"),
+        ):
+            self.assertEqual(guest_verify.crash_reservation(), 268435456)
+            self.assertEqual(read.call_count, 2)
+
+    def test_crash_reservation_busy_deadline_and_other_errors(self):
+        with (
+            patch.object(guest_verify.Path, "read_text", side_effect=OSError(errno.EBUSY, "busy")),
+            patch.object(guest_verify.time, "monotonic", side_effect=[0, 30]),
+            patch.object(guest_verify.time, "sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(guest_verify.GuestError, "reservation.*timed out"):
+                guest_verify.crash_reservation()
+            sleep.assert_not_called()
+        for code in (errno.EIO, errno.EACCES):
+            with (
+                self.subTest(code=code),
+                patch.object(guest_verify.Path, "read_text", side_effect=OSError(code, "failed")),
+                patch.object(guest_verify.time, "sleep") as sleep,
+            ):
+                with self.assertRaises(OSError) as raised:
+                    guest_verify.crash_reservation()
+                self.assertEqual(raised.exception.errno, code)
+                sleep.assert_not_called()
 
     def test_kvm_descriptors_close_on_success_and_failure(self):
         with (
