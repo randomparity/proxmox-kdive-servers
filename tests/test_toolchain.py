@@ -1,8 +1,12 @@
 """Toolchain capability, trust and filesystem boundary checks."""
 
+import contextlib
 import hashlib
+import io
+import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import guest_verify as g
+from scripts import guests
 
 
 class ToolchainTests(unittest.TestCase):
@@ -209,6 +214,42 @@ class ToolchainTests(unittest.TestCase):
         self.assertIn(
             ["systemctl", "enable", "--now", "docker.service", "libvirtd.service"], commands
         )
+
+    def test_known_level_errors_cross_both_boundaries_but_private_errors_do_not(self):
+        envelope = {
+            "level_operation": "verify",
+            "level": "toolchain",
+            "chain": [],
+            "proposed": None,
+        }
+        source = "Toolchain operator missing docker group; re-prepare"
+        for error in (source, source + " private-secret", "private-secret"):
+            diagnostic = io.StringIO()
+            with (
+                patch.object(g.sys, "stdin", io.StringIO(json.dumps(dict(envelope, request={})))),
+                contextlib.redirect_stderr(diagnostic),
+                patch.object(g, "run_level", side_effect=g.GuestError(error)),
+            ):
+                self.assertEqual(g.main(), 1)
+            self.assertNotIn("private-secret", diagnostic.getvalue())
+            result = subprocess.CompletedProcess([], 1, "", diagnostic.getvalue())
+            with (
+                patch.object(guests, "guest_ssh", return_value=[]),
+                patch.object(guests, "run_guest", return_value=result),
+            ):
+                with self.assertRaises(guests.ValidationError) as raised:
+                    guests.guest_rpc({"host": {}}, Path("unused"), envelope, 60)
+                self.assertEqual("docker group" in str(raised.exception), error == source)
+                with self.assertRaisesRegex(guests.ValidationError, "Guest baseline"):
+                    guests.guest_rpc({"host": {}}, Path("unused"), {"fresh": False}, 60)
+        for malicious in ("Toolchain operator missing docker group; re-prepare\nsecret", "secret"):
+            result = subprocess.CompletedProcess([], 1, "", malicious)
+            with (
+                patch.object(guests, "guest_ssh", return_value=[]),
+                patch.object(guests, "run_guest", return_value=result),
+            ):
+                with self.assertRaisesRegex(guests.ValidationError, "Guest baseline"):
+                    guests.guest_rpc({"host": {}}, Path("unused"), envelope, 60)
 
     def test_docker_key_fingerprint_exact(self):
         valid = "fpr:::::::::060A61C51B558A7F742B77AAC52FEB6B621E9F35:\n"

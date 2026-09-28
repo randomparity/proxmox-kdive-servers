@@ -17,6 +17,10 @@ configures the existing operator, and observes content. Check independently
 observes required capabilities and compares recorded critical versions. Baseline
 security and readiness still run before and after hooks through `run_level`.
 No service listens remotely as a result of explicit configuration in this change.
+The existing controller masks failed guest stderr. For level envelopes only, map a
+finite list of exact tool/group errors to controller-owned actionable remediation;
+unknown diagnostics remain masked. This necessary direct-caller adjustment meets
+#18 fault-message criteria without new RPC fields or emitting guest-controlled text.
 
 Common packages: bash, coreutils, findutils, grep, git, curl, ca-certificates.
 Native developer lists follow KDIVE `docs/operating/install.md`:

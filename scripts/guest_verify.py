@@ -593,6 +593,40 @@ DOCKER_REPOSITORY = (
 )
 
 
+TOOLCHAIN_DIAGNOSTICS = {
+    f"Toolchain operator {tool} failed; inspect guest prerequisites and re-prepare": (
+        f"Toolchain {tool} unavailable for operator; restore toolchain or re-prepare"
+    )
+    for tool in (
+        "bash",
+        "id",
+        "git",
+        "curl",
+        "gcc",
+        "make",
+        "pkg-config",
+        "python3",
+        "shellcheck",
+        "shfmt",
+        "realpath",
+        "find",
+        "grep",
+        "uv",
+        "just",
+        "docker",
+        "virsh",
+        "/usr/bin/qemu-system-x86_64",
+        "/usr/bin/qemu-kvm",
+        "/usr/libexec/qemu-kvm",
+    )
+} | {
+    f"Toolchain operator missing {group} group; re-prepare": (
+        f"Toolchain operator missing {group} group; restore toolchain or re-prepare"
+    )
+    for group in ("docker", "kvm", "libvirt")
+}
+
+
 def toolchain_packages(profile):
     return "bash coreutils findutils grep git curl ca-certificates".split() + (
         TOOLCHAIN_PACKAGES[profile].split()
@@ -1069,6 +1103,7 @@ def run_level(request, operation, name, chain, proposed):
 
 
 def main():
+    envelope = {}
     try:
         envelope = json.loads(sys.stdin.read(65537))
         check(isinstance(envelope, dict), "Invalid guest request")
@@ -1089,9 +1124,20 @@ def main():
             )
             result = run(envelope["request"], envelope["fresh"])
         print(json.dumps(result, sort_keys=True))
-    except (GuestError, OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (GuestError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        diagnostic = None
+        if (
+            isinstance(error, GuestError)
+            and isinstance(envelope, dict)
+            and set(envelope) == {"request", "level_operation", "level", "chain", "proposed"}
+        ):
+            diagnostic = TOOLCHAIN_DIAGNOSTICS.get(str(error))
         print(
-            "Guest baseline failed; inspect private cloud-init, identity, sizing, security and KVM",
+            diagnostic
+            or (
+                "Guest baseline failed; inspect private cloud-init, identity, "
+                "sizing, security and KVM"
+            ),
             file=sys.stderr,
         )
         return 1
