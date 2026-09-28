@@ -96,6 +96,48 @@ Static IPv4 is the initial contract. The `/31` point-to-point form is accepted;
 normal subnet/broadcast addresses, unusable addresses and mismatched gateways fail.
 The broad sizing bound prevents malformed inputs; it is not a Proxmox capacity claim.
 
+### KDIVE installation validation sizing
+
+The example allocates **8 vCPUs, 32768 MiB RAM (32 GiB), and 256 GiB root disk**
+per guest for [KDIVE #2807](https://github.com/randomparity/kdive/issues/2807).
+These are planning defaults for one active installation lane and one nested test
+guest, not measured minimums or permission to run every lane concurrently.
+CPU and RAM leave room for the host stack, package installation, libguestfs and
+the nested guest. Kernel-build concurrency needs a separate measured budget.
+
+The disk budget allows 32 GiB for the OS/tools/container images, 48 GiB for
+fixtures and nested guest disks, 48 GiB for working artifacts, and 96 GiB kept
+free for KDIVE's default external-boot recovery capacity check (three 32 GiB
+activations), leaving 32 GiB for filesystem overhead and headroom. These are
+planning budgets; check actual free space before setup and each scenario. Recovery
+capacity is free space on the relevant filesystem, not the nominal virtual disk size. See the
+[KDIVE installation contract](https://github.com/randomparity/kdive/blob/main/docs/operating/install.md).
+
+Four such VMs total 32 configured vCPUs, 128 GiB RAM and 1 TiB of root disks,
+plus templates, auxiliary disks and snapshot growth. A 24-CPU host cannot admit
+all four as one fresh batch; run exact targets sequentially, stop an idle lane
+through the operator's lifecycle process, and leave capacity for Proxmox and
+other workloads. Even two lanes need 64 GiB available RAM plus host headroom.
+The existing live admission checks remain authoritative; thin provisioning is
+not a substitute for free capacity. A 4 TB pool is not all available to this lab.
+
+Ubuntu, Fedora and Rocky provide the three host-family representatives for
+#2807. openSUSE remains available for the broader #2803 guest matrix; its presence
+does not extend KDIVE's supported host-installation families. Keep nested KVM and
+SELinux/AppArmor enforcement enabled. Sizing alone proves neither clean/resettable
+ownership nor installation: #2807 still needs documented setup, real provision/boot,
+repeat setup and cleanup evidence. Native POWER qualification remains separate.
+
+To change a private inventory, copy it to a new ignored file and update `cores`,
+`memory_mib` and `disk_gib`, including any per-host overrides. Validate it offline
+before a live plan. **Do not apply changed sizing to an existing guest ID:** sizing
+is part of its ownership identity, and provisioning rejects the mismatch instead
+of resizing or re-marking it. Preserve the original inventory for existing guests.
+Use operator-assigned unused VM IDs and network identities for replacement guests,
+or arrange explicitly authorized teardown/recreation of the old disposable guests.
+Templates retain their small, unbooted hardware configuration; clone sizing is
+independent. Clean snapshot/restore support remains owned by issue #5.
+
 Credential names are checked without reading their environment values. There is no
 need to set them for offline checks. Recognizable plaintext API credentials and
 Ansible SSH/sudo/su passwords, inline private keys and passphrases are rejected;

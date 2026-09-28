@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def request():
     host = managed_hosts(load_inventory(ROOT / "inventory/example.yml"))["ubuntu_local"]
-    host["storage"] = "pool"
+    host.update(storage="pool", cores=2, memory_mib=4096, disk_gib=32)
     host.pop("vlan", None)
     source = {
         "template": 1,

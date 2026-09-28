@@ -292,7 +292,7 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(result.stdout, "Inventory valid: 1 selected target(s).\n")
         self.assertEqual(result.stderr, "")
         host = load_inventory(EXAMPLE)["_meta"]["hostvars"]["ubuntu_local"]
-        self.assertEqual(host["memory_mib"], 4096)
+        self.assertEqual(host["memory_mib"], 32768)
 
     def test_bad_sources_are_safe(self):
         sources = [
