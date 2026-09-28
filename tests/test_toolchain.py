@@ -166,6 +166,9 @@ class ToolchainTests(unittest.TestCase):
         ):
             content = g.toolchain_observation(request)
             self.assertEqual(content["uv"], "0.12.19")
+            outputs["uv"] = "uv 0.12.18"
+            self.assertEqual(g.toolchain_observation(request)["uv"], "0.12.18")
+            outputs["uv"] = "uv 0.12.19"
             for missing in (
                 "git",
                 "curl",

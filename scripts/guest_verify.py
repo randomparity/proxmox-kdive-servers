@@ -846,10 +846,6 @@ def toolchain_observation(request):
             f"Toolchain {name} version invalid; inspect installed tool",
         )
         versions[name] = value
-    check(
-        versions["uv"] == UV_VERSION and versions["just"] == JUST_VERSION,
-        "Toolchain pinned uv/just differs; re-prepare",
-    )
     return {
         "distro": profile,
         "release": request["template"]["image"]["release"],
@@ -906,7 +902,12 @@ def prepare_toolchain(request):
         ["systemctl", "enable", "--now", "docker.service", *libvirt], "runtime services", 120
     )
     prepare_operator_tools(user, account)
-    return toolchain_observation(request)
+    content = toolchain_observation(request)
+    check(
+        content["uv"] == UV_VERSION and content["just"] == JUST_VERSION,
+        "Toolchain pinned uv/just differs; re-prepare",
+    )
+    return content
 
 
 def check_toolchain(request, content):
