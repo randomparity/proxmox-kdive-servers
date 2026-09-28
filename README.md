@@ -419,7 +419,7 @@ failure retains the partial. An SSH disconnect during the one reboot request may
 carry no response or the complete reboot acknowledgement; both require the same
 strict post-boot proof. Invalid responses stop for inspection.
 There is no forced power fallback, reboot retry or automatic recovery. Ready reruns remain read-only.
-No libvirt, KDIVE, build/debug tooling or runners are installed.
+`clean` provisioning installs no libvirt, KDIVE, build/debug tooling or runners.
 
 Verification checks successful cloud-init, authenticated SSH/noninteractive sudo,
 actual OS/release/x86_64, hostname/FQDN/static IPv4, CPU/RAM/root filesystem, active
@@ -605,3 +605,28 @@ signing key before import, preserving TLS and RPM signature checks. It refuses c
 configuration rather than replacing it. No other package repositories are added. openSUSE
 remains best-effort; this level does not imply KDIVE worker-host support. Missing packages
 or service failures stop preparation for inspection; there is no automatic rollback.
+
+Native proof on 2026-09-28: Ubuntu 24.04, Fedora 44 and openSUSE Leap 16.0 reached READY.
+Their operator-captured snapshots passed verify and restore. Hiding `just` and removing the operator's `docker`
+membership each produced an actionable verification failure; restoring the snapshot repaired
+each fault and re-verified the level. AppArmor/SELinux baseline checks stayed enforcing. All three guests finished stopped with
+`clean` and `toolchain` retained. openSUSE installs `polkit` explicitly so its existing libvirt
+group authorization policy works without enabling recommended packages wholesale.
+
+Rocky 10.2 stopped before READY with the native DNF error
+`Unable to find a match: libvirt-devel ShellCheck shfmt` using BaseOS, AppStream, Extras and
+the approved Docker source. No extra repository was enabled to bypass this gap. The failed
+attempt retains inspectable partial state and its original `clean`; it has no `toolchain`
+snapshot.
+
+Measured snapshot allocation above `clean`:
+
+| Profile | New blocks since clean (MiB) | Referenced-size increase (MiB) |
+| --- | ---: | ---: |
+| Ubuntu 24.04 | 820.29 | 786.87 |
+| Fedora 44 | 1751.84 | 1667.27 |
+| openSUSE Leap 16.0 | 1005.34 | 867.96 |
+
+These are native ZFS `written@clean` and `referenced` differences at the captured toolchain
+snapshot, summed across root and EFI volumes (1 MiB = 1,048,576 bytes). They exclude disk
+reservations and are measurements of these package versions, not capacity guarantees.
