@@ -28,6 +28,7 @@ def request():
     host.pop("vlan", None)
     source = {
         "template": 1,
+        "scsi0": "pool:base-9001-disk-0,size=4G",
         "net0": "virtio=02:11:22:33:44:55,bridge=vmbr0",
         "description": "kdive-template-v1:"
         + guest_host.template_host.identity(guests.templates.request_for(host, False, False))
@@ -85,7 +86,11 @@ class TestGuestHost(unittest.TestCase):
     def test_guest_vlan_is_independent_of_verified_source(self):
         self.host["vlan"] = 25
         guest_host.validate_request(self.request)
-        source = {"net0": "virtio=02:11:22:33:44:55,bridge=vmbr0,tag=30", "template": 1}
+        source = {
+            "net0": "virtio=02:11:22:33:44:55,bridge=vmbr0,tag=30",
+            "template": 1,
+            "scsi0": "pool:base-9001-disk-0,size=4G",
+        }
         template = dict(self.request["template"], vlan=30)
         source["description"] = (
             "kdive-template-v1:" + guest_host.template_host.identity(template) + ":ready"
@@ -96,6 +101,57 @@ class TestGuestHost(unittest.TestCase):
         for field, value in [("net0", "virtio=bad,bridge=vmbr0,tag=0"), ("description", "foreign")]:
             with self.subTest(field=field), self.assertRaises(ValueError):
                 guests.request_for(self.host, "a" * 40, dict(source, **{field: value}))
+
+    def test_guest_overrides_and_balloon_default_are_explicit(self):
+        self.host.update(cpu="x86-64-v3", nic_queues=4, bridge="vmbr2", storage="other-pool")
+        guest_host.validate_request(self.request)
+        config = guest_host.desired_config(self.request)
+        self.assertEqual(config["cpu"], "x86-64-v3")
+        self.assertEqual(config["balloon"], str(self.host["memory_mib"]))
+        net = guest_host.desired_network(self.request, {"net0": "virtio=02:11:22:33:44:55"})
+        self.assertEqual(net, "virtio=02:11:22:33:44:55,bridge=vmbr2,queues=4")
+        baseline = guest_host.identity(self.request)
+        for field, value in (
+            ("cpu", "host"),
+            ("nic_queues", 2),
+            ("bridge", "vmbr3"),
+            ("storage", "third-pool"),
+            ("balloon_mib", 0),
+        ):
+            changed = copy.deepcopy(self.request)
+            changed["host"][field] = value
+            self.assertNotEqual(guest_host.identity(changed), baseline)
+        self.host.update(balloon_mib=0, nic_model="e1000")
+        self.host.pop("nic_queues")
+        self.assertEqual(guest_host.desired_config(self.request)["balloon"], "0")
+        self.assertTrue(
+            guest_host.desired_network(
+                self.request, {"net0": "virtio=02:11:22:33:44:55"}
+            ).startswith("e1000=")
+        )
+
+    def test_guest_baseline_does_not_inherit_template_fixed_values(self):
+        expected = guest_host.desired_config(self.request)
+        with patch.dict(
+            guest_host.template_host.FIXED,
+            {"cpu": "other", "cores": "1", "memory": "128", "agent": "0"},
+        ):
+            self.assertEqual(guest_host.desired_config(self.request), expected)
+
+    def test_disabled_balloon_preserves_legacy_identity(self):
+        self.host["balloon_mib"] = 0
+        expected = guest_host.template_host.digest(
+            {
+                "schema": 1,
+                "management": 1,
+                "template": guest_host.template_host.identity(self.request["template"]),
+                "guest": {k: self.host[k] for k in guest_host.BASELINE_FIELDS}
+                | {"vlan": self.host.get("vlan")},
+            }
+        )
+        self.assertEqual(guest_host.identity(self.request), expected)
+        self.host.pop("balloon_mib")
+        self.assertNotEqual(guest_host.identity(self.request), expected)
 
     def test_acknowledgement_cannot_mark_another_guest_ready(self):
         expected = {
@@ -378,6 +434,7 @@ class TestGuestVerifier(unittest.TestCase):
             "cpus": 2,
             "memory_bytes": 4 * 1024**3,
             "crash_reserved_bytes": 0,
+            "balloon_driver": True,
             "filesystem_bytes": 31 * 1024**3,
             "security": "apparmor-enforcing",
             "kvm_api": 12,
@@ -404,6 +461,17 @@ class TestGuestVerifier(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(guest_verify.GuestError):
                 guest_verify.validate_observation(req, dict(observed, **{field: value}))
 
+        req["host"]["balloon_mib"] = 1024
+        guest_verify.validate_observation(req, dict(observed, memory_bytes=1024**3))
+        for bad in (
+            dict(observed, balloon_driver=False),
+            dict(observed, memory_bytes=512 * 1024**2),
+        ):
+            with self.assertRaises(guest_verify.GuestError):
+                guest_verify.validate_observation(req, bad)
+        req["host"]["balloon_mib"] = 0
+        guest_verify.validate_observation(req, dict(observed, balloon_driver=False))
+        req["host"].pop("balloon_mib")
         for configured_mib, usable, reserved in (
             (4096, 3819302912, 256 * 1024**2),
             (4096, 4 * 1024**3, 0),
@@ -812,9 +880,12 @@ class GuestNativeFixture:
         self.volumes = []
         self.calls = []
         self.fail_clone = False
+        self.destination_extent = 0
 
     def __call__(self, argv, **kwargs):
         self.calls.append(argv)
+        if argv[0] == "vgs":
+            return self.template(argv, **kwargs)
         if argv[0] == "pvesh":
             return self.read(argv)
         if argv[:2] == ["qm", "clone"]:
@@ -833,7 +904,10 @@ class GuestNativeFixture:
             config["smbios1"] = f"uuid=00000000-0000-4000-8000-{vmid:012d}"
             for slot in ("scsi0", "ide2", "efidisk0"):
                 config[slot] = (
-                    config[slot].replace("base-9001", f"vm-{vmid}").replace("vm-9001", f"vm-{vmid}")
+                    config[slot]
+                    .replace("base-9001", f"vm-{vmid}")
+                    .replace("vm-9001", f"vm-{vmid}")
+                    .replace("pool:", opts["--storage"] + ":")
                 )
             self.guests[vmid] = {"config": config, "status": "stopped", "pending": []}
             for v in self.template.volumes:
@@ -841,9 +915,13 @@ class GuestNativeFixture:
                     dict(
                         v,
                         vmid=vmid,
+                        size=guest_host.template_host.allocated_size(
+                            v["size"], self.destination_extent
+                        ),
                         volid=v["volid"]
                         .replace("base-9001", f"vm-{vmid}")
-                        .replace("vm-9001", f"vm-{vmid}"),
+                        .replace("vm-9001", f"vm-{vmid}")
+                        .replace("pool:", opts["--storage"] + ":"),
                     )
                 )
             return ""
@@ -860,11 +938,20 @@ class GuestNativeFixture:
                 slot = opts.pop("--delete")
                 volume = guest["config"].pop(slot).split(",")[0]
                 self.volumes = [v for v in self.volumes if v["volid"] != volume]
-            if opts.get("--scsi1") == "pool:cloudinit":
-                volume = f"pool:vm-{vmid}-cloudinit"
+            if opts.get("--scsi1", "").endswith(":cloudinit"):
+                storage = opts["--scsi1"].split(":")[0]
+                volume = f"{storage}:vm-{vmid}-cloudinit"
                 opts["--scsi1"] = volume + ",media=cdrom,size=4M"
                 self.volumes.append(
-                    dict(vmid=vmid, volid=volume, size=4 * 1024**2, format="raw", content="images")
+                    dict(
+                        vmid=vmid,
+                        volid=volume,
+                        size=guest_host.template_host.allocated_size(
+                            4 * 1024**2, self.destination_extent
+                        ),
+                        format="raw",
+                        content="images",
+                    )
                 )
             for key, value in opts.items():
                 guest["config"][key.removeprefix("--")] = (
@@ -1072,6 +1159,117 @@ class TestNativeLifecycle(unittest.TestCase):
                 self.assertFalse(
                     any(c[:2] in (["qm", "set"], ["qm", "clone"]) for c in self.fixture.calls)
                 )
+
+    def test_clone_applies_all_guest_settings_and_rejects_drift(self):
+        original = copy.deepcopy(self.fixture.template.config)
+        self.req["host"].update(
+            cpu="x86-64-v3",
+            storage="guestpool",
+            bridge="vmbr2",
+            vlan=12,
+            nic_queues=4,
+            balloon_mib=2048,
+        )
+        self.fixture.destination_extent = 16 * 1024**2
+        self.fixture.template.extent = self.fixture.destination_extent
+        read = self.fixture.read
+
+        def destination(argv):
+            if argv[2] == "/storage/guestpool":
+                return '{"type":"lvmthin","vgname":"vg-example"}'
+            if argv[2].endswith("/storage/guestpool/status"):
+                return json.dumps(dict(self.fixture.template.storage, type="lvmthin"))
+            if argv[2].endswith("/network"):
+                return json.dumps([dict(self.fixture.template.bridge, iface="vmbr2")])
+            return read(argv)
+
+        with patch.object(self.fixture, "read", side_effect=destination):
+            self.execute("apply")
+            config = self.fixture.guests[1101]["config"]
+            self.assertEqual(config["cpu"], "x86-64-v3")
+            self.assertEqual(config["balloon"], "2048")
+            self.assertTrue(config["scsi0"].startswith("guestpool:"))
+            self.assertIn("bridge=vmbr2,tag=12,queues=4", config["net0"])
+            self.assertEqual(self.fixture.template.config, original)
+            self.execute("verify")
+            for key, value in (
+                ("cpu", "host"),
+                ("balloon", "0"),
+                ("net0", config["net0"].replace("queues=4", "queues=2")),
+            ):
+                saved = config[key]
+                config[key] = value
+                with self.subTest(key=key), self.assertRaises(guest_host.GuestError):
+                    self.execute("verify")
+                config[key] = saved
+
+    def test_large_source_extents_survive_smaller_destination_geometry(self):
+        self.req["host"]["storage"] = "guestpool"
+        self.fixture.template.storage["type"] = "lvmthin"
+        self.fixture.template.extent = 16 * 1024**2
+        for volume in self.fixture.template.volumes:
+            volume["size"] = guest_host.template_host.allocated_size(
+                volume["size"], self.fixture.template.extent
+            )
+        original_read = self.fixture.read
+        original_command = self.fixture.__call__
+        for destination_extent in (0, 4 * 1024**2):
+            self.fixture.guests.clear()
+            self.fixture.volumes.clear()
+            self.fixture.destination_extent = destination_extent
+            capacity = {"avail": 100 * 1024**3}
+
+            def read(argv, destination_extent=destination_extent, capacity=capacity):
+                if argv[2] == "/storage/guestpool":
+                    return '{"type":"lvmthin","vgname":"vg-destination"}'
+                if argv[2].endswith("/storage/guestpool/status"):
+                    return json.dumps(
+                        dict(
+                            self.fixture.template.storage,
+                            type="lvmthin" if destination_extent else "zfspool",
+                            avail=capacity["avail"],
+                        )
+                    )
+                return original_read(argv)
+
+            def command(argv, destination_extent=destination_extent, **kwargs):
+                if argv[0] == "vgs" and argv[-1] == "vg-destination":
+                    return json.dumps(
+                        {
+                            "report": [
+                                {
+                                    "vg": [
+                                        {
+                                            "vg_name": "vg-destination",
+                                            "vg_extent_size": str(destination_extent),
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    )
+                return original_command(argv, **kwargs)
+
+            with (
+                self.subTest(extent=destination_extent),
+                patch.object(self.fixture, "read", side_effect=read),
+                patch.object(guest_host.template_host, "command", side_effect=command),
+            ):
+                self.execute("apply")
+                self.execute("verify")
+                self.fixture.guests.clear()
+                self.fixture.volumes.clear()
+                self.fixture.calls.clear()
+                capacity["avail"] = 32 * 1024**3 + 2 * 16 * 1024**2 - 1
+                with self.assertRaisesRegex(guest_host.GuestError, "storage space"):
+                    self.execute("apply")
+                self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
+
+    def test_legacy_disabled_guest_without_explicit_shares_verifies(self):
+        self.req["host"]["balloon_mib"] = 0
+        self.execute("apply")
+        self.fixture.guests[1101]["config"].pop("shares")
+        self.assertEqual(self.execute("verify")[-1]["action"], "preserved")
 
     def test_source_api_native_disagreement_fails_before_write(self):
         self.fixture.template.config["net0"] += ",tag=30"
@@ -1543,6 +1741,7 @@ class TestRebootExchange(unittest.TestCase):
                             cpus=2,
                             memory_bytes=4 * 1024**3,
                             crash_reserved_bytes=0,
+                            balloon_driver=True,
                             filesystem_bytes=31 * 1024**3,
                             security="selinux-enforcing",
                             kvm_api=12,

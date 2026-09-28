@@ -14,11 +14,11 @@ from pathlib import Path
 
 if __package__:
     from . import guest_verify, template_host
-    from .validate_inventory import validate_host
+    from .validate_inventory import NIC_MODELS, validate_host
 else:
     import guest_verify
     import template_host
-    from validate_inventory import validate_host
+    from validate_inventory import NIC_MODELS, validate_host
 
 GuestError = template_host.TemplateError
 check = template_host.check
@@ -39,13 +39,23 @@ BASELINE_FIELDS = (
 
 
 def identity(request):
+    h, t = request["host"], request["template"]
+    overrides = {key: h[key] for key in ("cpu", "bridge", "storage") if h[key] != t[key]}
+    if h.get("nic_model", "virtio") != "virtio":
+        overrides["nic_model"] = h["nic_model"]
+    if "nic_queues" in h:
+        overrides["nic_queues"] = h["nic_queues"]
+    balloon = h.get("balloon_mib", h["memory_mib"])
+    if balloon:
+        overrides["balloon_mib"] = balloon
     return template_host.digest(
         {
             "schema": 1,
             "management": 1,
             "template": template_host.identity(request["template"]),
             "guest": {key: request["host"][key] for key in BASELINE_FIELDS}
-            | {"vlan": request["host"].get("vlan")},
+            | {"vlan": request["host"].get("vlan")}
+            | overrides,
         }
     )
 
@@ -70,9 +80,6 @@ def validate_request(request):
                 ("profile", "profile"),
                 ("template_vmid", "template_vmid"),
                 ("proxmox_node", "node"),
-                ("storage", "storage"),
-                ("bridge", "bridge"),
-                ("cpu", "cpu"),
             )
         ),
         "Template and guest inputs differ",
@@ -89,7 +96,7 @@ def validate_request(request):
     )
 
 
-def check_capacity(requests, node, memory, storages):
+def check_capacity(requests, node, memory, storages, source_extents=None):
     if not requests:
         return
     cpu = node.get("cpu")
@@ -124,7 +131,13 @@ def check_capacity(requests, node, memory, storages):
         extent = status["extent_bytes"]
         demand = sum(
             template_host.allocated_size(r["host"]["disk_gib"] * 1024**3, extent)
-            + 2 * template_host.allocated_size(8 * 1024**2, extent)
+            + 2
+            * template_host.allocated_size(
+                template_host.allocated_size(
+                    8 * 1024**2, (source_extents or {}).get(r["host"]["template_vmid"], 0)
+                ),
+                extent,
+            )
             for r in requests
             if r["host"]["storage"] == storage
         )
@@ -164,12 +177,22 @@ def base_path(request):
 
 def desired_config(request):
     h = request["host"]
-    return template_host.FIXED | {
+    return {
+        "cpu": h["cpu"],
+        "bios": "ovmf",
+        "scsihw": "virtio-scsi-pci",
+        "serial0": "socket",
+        "vga": "serial0",
+        "boot": "order=scsi0",
+        "ostype": "l26",
+        "citype": "nocloud",
+        "onboot": "0",
         "name": h["fqdn"].split(".")[0],
         "searchdomain": h["fqdn"].split(".", 1)[1],
         "cores": str(h["cores"]),
         "memory": str(h["memory_mib"]),
-        "balloon": "0",
+        "balloon": str(h.get("balloon_mib", h["memory_mib"])),
+        "shares": "1000",
         "agent": "1",
         "ciupgrade": "0",
         "ciuser": h["ansible_user"],
@@ -181,12 +204,20 @@ def desired_config(request):
 
 def desired_network(request, config):
     h = request["host"]
-    mac = template_host.properties(config.get("net0")).get("virtio")
+    net = template_host.properties(config.get("net0"))
+    models = set(net) & NIC_MODELS
+    check(len(models) == 1, "Missing cloned NIC model; inspect retained guest")
+    mac = net[models.pop()]
     check(
         isinstance(mac, str) and re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", mac),
         "Missing cloned NIC identity; inspect retained guest",
     )
-    return f"virtio={mac},bridge={h['bridge']}" + (f",tag={h['vlan']}" if "vlan" in h else "")
+    value = f"{h.get('nic_model', 'virtio')}={mac},bridge={h['bridge']}"
+    if "vlan" in h:
+        value += f",tag={h['vlan']}"
+    if "nic_queues" in h:
+        value += f",queues={h['nic_queues']}"
+    return value
 
 
 def check_configuration(request, config, pending, phase):
@@ -218,7 +249,7 @@ def check_configuration(request, config, pending, phase):
     }
     check(set(config) <= allowed, "Unexpected guest configuration or disks; inspect drift")
     for key, value in expected.items():
-        actual = str(config.get(key))
+        actual = str(config.get(key, "1000" if key == "shares" else None))
         if key == "sshkeys":
             actual = urllib.parse.unquote(actual).strip()
             value = value.strip()
@@ -226,13 +257,9 @@ def check_configuration(request, config, pending, phase):
             actual = template_host.properties(actual)
             value = template_host.properties(value)
         check(actual == value, "Guest managed configuration differs; inspect drift before retry")
-    net = template_host.properties(config.get("net0"))
-    h = request["host"]
     check(
-        set(net) == {"virtio", "bridge"} | ({"tag"} if "vlan" in h else set())
-        and net.get("bridge") == h["bridge"]
-        and re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", net.get("virtio") or "")
-        and ("vlan" not in h or net.get("tag") == str(h["vlan"])),
+        template_host.properties(config.get("net0"))
+        == template_host.properties(desired_network(request, config)),
         "Guest network configuration differs",
     )
 
@@ -256,12 +283,22 @@ def inspect_guest(request, phase="ready", running=True, seed_pending=False):
         "Guest runtime state differs; inspect exclusive use before retry",
     )
     h = request["host"]
-    t = dict(request["template"], template_vmid=h["vmid"])
+    t = dict(request["template"], template_vmid=h["vmid"], storage=h["storage"])
     t["image"] = dict(t["image"], virtual_size_bytes=h["disk_gib"] * 1024**3)
     storage = native(f"/nodes/{t['node']}/storage/{t['storage']}/status")
     extent = template_host.lvm_extent(t) if storage.get("type") == "lvmthin" else 0
-    # Reuse the template volume policy while keeping its original IDE layout unchanged.
-    template_host.verify_disks(t, checked | {"ide2": checked.get("scsi1")}, extent)
+    source = request["template"]
+    source_storage = native(f"/nodes/{source['node']}/storage/{source['storage']}/status")
+    source_extent = (
+        template_host.lvm_extent(source) if source_storage.get("type") == "lvmthin" else 0
+    )
+    template_host.verify_disks(
+        t,
+        checked | {"ide2": checked.get("scsi1")},
+        extent,
+        source_extent=source_extent,
+        inherited_seed=seed_pending,
+    )
     feature = native(path + "/feature", "--feature", "snapshot")
     check(
         isinstance(feature, dict) and feature.get("hasFeature") == 1,
@@ -282,14 +319,18 @@ def admission(requests):
         "Selected guest/template IDs collide",
     )
     storages = {}
+    source_extents = {}
     for r in requests:
         t = r["template"]
-        storages[t["storage"]] = template_host.host_admission(dict(t, vlan=r["host"].get("vlan")))
+        h = r["host"]
+        source_storage = template_host.host_admission(t, network=False)
+        source_extents[t["template_vmid"]] = source_storage["extent_bytes"]
+        storages[h["storage"]] = template_host.host_admission(
+            dict(t, storage=h["storage"], bridge=h["bridge"], vlan=h.get("vlan"))
+        )
         check(template_host.existing_resource(t), "Selected template is absent")
         marker_value = "kdive-template-v1:" + template_host.identity(t) + ":ready"
-        config = template_host.verify_configuration(
-            t, marker_value, storages[t["storage"]]["extent_bytes"]
-        )
+        config = template_host.verify_configuration(t, marker_value, source_storage["extent_bytes"])
         check(config.get("template") == 1, "Selected source is not a ready template")
     flags = Path("/proc/cpuinfo").read_text().split()
     module = "kvm_intel" if "vmx" in flags else "kvm_amd" if "svm" in flags else None
@@ -308,11 +349,21 @@ def admission(requests):
         if present:
             inspect_guest(request)
     fresh = [r for r, present in zip(requests, existing, strict=True) if not present]
+    for r in fresh:
+        check(
+            r["host"]["disk_gib"] * 1024**3
+            >= template_host.allocated_size(
+                r["template"]["image"]["virtual_size_bytes"],
+                source_extents[r["host"]["template_vmid"]],
+            ),
+            "Guest root disk cannot shrink the source allocation; increase disk_gib",
+        )
     check_capacity(
         fresh,
         native(f"/nodes/{hosts[0]['proxmox_node']}/status"),
         Path("/proc/meminfo").read_text(),
         storages,
+        source_extents,
     )
     return existing
 

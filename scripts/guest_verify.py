@@ -418,6 +418,7 @@ def observation(request):
         "cpus": os.cpu_count(),
         "memory_bytes": int(memory["MemTotal"].split()[0]) * 1024,
         "crash_reserved_bytes": crash_reservation(),
+        "balloon_driver": any(Path("/sys/bus/virtio/drivers/virtio_balloon").glob("virtio[0-9]*")),
         "filesystem_bytes": filesystem.f_blocks * filesystem.f_frsize,
         "security": security_state(request["host"]["profile"]),
         "kvm_api": kvm_probe(),
@@ -459,6 +460,12 @@ def validate_observation(request, result):
         "Guest CPU count differs",
     )
     configured = host["memory_mib"] * 1024**2
+    balloon = host.get("balloon_mib", host["memory_mib"])
+    check(
+        not balloon or result.get("balloon_driver") is True,
+        "VirtIO balloon driver is not bound; inspect guest modules/device",
+    )
+    target = (balloon or host["memory_mib"]) * 1024**2
     usable, reserved = result.get("memory_bytes"), result.get("crash_reserved_bytes")
     check(
         type(usable) is int
@@ -469,7 +476,7 @@ def validate_observation(request, result):
         "Guest memory evidence invalid; inspect usable RAM and native crash reservation",
     )
     check(
-        usable + reserved >= configured * 0.9,
+        usable + reserved >= target * 0.9,
         "Guest memory capacity insufficient; inspect allocation and crash reservation",
     )
     disk = host["disk_gib"] * 1024**3

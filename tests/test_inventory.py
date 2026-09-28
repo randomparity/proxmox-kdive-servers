@@ -38,11 +38,36 @@ class TestValidation(unittest.TestCase):
             profile=self.host["profile"], template_vmid=self.host["template_vmid"], vlan=25
         )
         self.assertEqual(validate_inventory(self.data), 4)
-        with self.assertRaises(ValidationError):
-            validate_inventory(self.data, purpose="templates")
-        other["bridge"] = "vmbr1"
+        self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
+        other["proxmox_node"] = "node2"
         with self.assertRaises(ValidationError):
             validate_inventory(self.data)
+
+    def test_guest_hardware_options_and_shared_source(self):
+        other = self.data["_meta"]["hostvars"]["fedora"]
+        other.update(
+            profile=self.host["profile"],
+            template_vmid=self.host["template_vmid"],
+            cpu="x86-64-v3",
+            bridge="vmbr2",
+            storage="other-pool",
+            vlan=25,
+            nic_queues=4,
+            balloon_mib=4096,
+        )
+        for purpose in ("guests", "templates"):
+            self.assertEqual(validate_inventory(self.data, purpose=purpose), 4)
+        for field, values in {
+            "cpu": [None, True, "bad model", "host,flags=oops"],
+            "nic_model": ["unknown", None, True],
+            "nic_queues": [-1, 65, True, "4"],
+            "balloon_mib": [-1, self.host["memory_mib"] + 1, True, "4096"],
+        }.items():
+            for value in values:
+                candidate = copy.deepcopy(self.data)
+                candidate["_meta"]["hostvars"]["ubuntu"][field] = value
+                with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
+                    validate_inventory(candidate)
 
     def test_invalid_field_types_and_values(self):
         cases = {
@@ -236,7 +261,7 @@ class TestTemplateValidation(unittest.TestCase):
             validate_inventory(self.data, "fedora", purpose="templates")
         other["profile"] = self.host["profile"]
         self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
-        for field, value in [("vlan", 33), ("storage", "different"), ("bridge", "vmbr1")]:
+        for field, value in [("proxmox_node", "node2"), ("proxmox_api_host", "different.invalid")]:
             with self.subTest(field=field):
                 original = other.copy()
                 other[field] = value
@@ -250,7 +275,7 @@ class TestTemplateValidation(unittest.TestCase):
 
     def test_template_literal_inputs(self):
         for field, values in {
-            "cpu": [None, "x86-64-v2", "{{ value }}"],
+            "cpu": [None, "bad model", "{{ value }}"],
             "template_vmid": [None, True, 99, 1000000000],
             "vlan": [False, 0, 4095, "12"],
             "proxmox_ssh_host": ["-option", "bad host", "$(command)"],

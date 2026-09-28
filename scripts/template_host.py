@@ -282,7 +282,7 @@ def allocated_size(size, extent):
     return (size + extent - 1) // extent * extent if extent else size
 
 
-def host_admission(request):
+def host_admission(request, *, network=True):
     check(
         os.geteuid() == 0 and platform.system() == "Linux" and platform.machine() == "x86_64",
         "Native host requires root on x86_64 Linux",
@@ -314,6 +314,8 @@ def host_admission(request):
         "Storage must be active image-capable zfspool or lvmthin",
     )
     storage["extent_bytes"] = lvm_extent(request) if storage["type"] == "lvmthin" else 0
+    if not network:
+        return storage
     bridges = native(f"{path}/network")
     check(
         isinstance(bridges, list) and all(isinstance(row, dict) for row in bridges),
@@ -364,6 +366,27 @@ def properties(value):
         check(key not in result, "Duplicate native device property")
         result[key] = item if separator else None
     return result
+
+
+def source_request(request, config):
+    check(isinstance(config, dict), "Invalid source template configuration")
+    net = properties(config.get("net0"))
+    tag = net.get("tag")
+    check(
+        "tag" not in net or isinstance(tag, str) and re.fullmatch(r"[1-9][0-9]{0,3}", tag),
+        "Invalid source VLAN metadata",
+    )
+    disk = properties(config.get("scsi0"))
+    volumes = [key for key, value in disk.items() if value is None]
+    check(len(volumes) == 1 and ":" in volumes[0], "Invalid source root volume")
+    resolved = dict(
+        request,
+        bridge=net.get("bridge"),
+        vlan=int(tag) if tag else None,
+        storage=volumes[0].split(":", 1)[0],
+    )
+    validate_request(resolved)
+    return resolved
 
 
 def verify_configuration(request, marker, extent):
@@ -422,7 +445,7 @@ def verify_configuration(request, marker, extent):
     return config
 
 
-def verify_disks(request, config, extent):
+def verify_disks(request, config, extent, *, source_extent=0, inherited_seed=False):
     volumes = native(f"/nodes/{request['node']}/storage/{request['storage']}/content")
     check(
         isinstance(volumes, list) and all(isinstance(row, dict) for row in volumes),
@@ -470,10 +493,13 @@ def verify_disks(request, config, extent):
         )
         size = matches[0].get("size")
         minimum = request["image"]["virtual_size_bytes"] if slot == "scsi0" else 1
+        auxiliary = 8 * 1024**2
+        if slot == "efidisk0" or slot == "ide2" and inherited_seed:
+            auxiliary = allocated_size(auxiliary, source_extent)
         maximum = (
             allocated_size(minimum, extent)
             if slot == "scsi0"
-            else allocated_size(8 * 1024**2, extent)
+            else allocated_size(auxiliary, extent)
         )
         if slot == "scsi0" and not extent:
             maximum += 1024**2
@@ -564,13 +590,15 @@ def observed_phase(request, template_identity):
 def run(request):
     started = time.monotonic()
     validate_request(request)
-    storage = host_admission(request)
-    template_identity = identity(request)
     lock = template_lock(request["template_vmid"]) if request["apply"] else contextlib.nullcontext()
     with lock:
+        exists = existing_resource(request)
+        if exists:
+            base = f"/nodes/{request['node']}/qemu/{request['template_vmid']}"
+            request = source_request(request, native(base + "/config"))
+        storage = host_admission(request, network=not exists)
+        template_identity = identity(request)
         try:
-            if request["apply"]:
-                storage = host_admission(request)
             action, config = lifecycle(request, storage, template_identity)
         except TemplateError as error:
             error.phase = observed_phase(request, template_identity)
@@ -579,6 +607,7 @@ def run(request):
         "profile": request["profile"],
         "template_vmid": request["template_vmid"],
         "identity": template_identity,
+        "source": {key: request[key] for key in ("bridge", "storage", "vlan")},
         "action": action,
         "config_sha256": digest(config),
         "duration_seconds": round(time.monotonic() - started, 3),

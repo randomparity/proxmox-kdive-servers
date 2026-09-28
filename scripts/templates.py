@@ -125,8 +125,8 @@ def request_for(host, apply, resume):
         "node": host["proxmox_node"],
         "storage": host["storage"],
         "bridge": host["bridge"],
-        "vlan": host.get("vlan"),
-        "cpu": host["cpu"],
+        "vlan": None,
+        "cpu": "host",
         "image": profiles[host["profile"]],
         "apply": apply,
         "resume": resume,
@@ -190,16 +190,42 @@ def dispatch(host, request):
         result = json.loads(process.stdout)
     except json.JSONDecodeError:
         raise ValidationError("SSH: invalid template result; inspect host state") from None
-    keys = {"profile", "template_vmid", "identity", "action", "config_sha256", "duration_seconds"}
+    keys = {
+        "profile",
+        "template_vmid",
+        "identity",
+        "action",
+        "config_sha256",
+        "duration_seconds",
+        "source",
+    }
+    require(
+        isinstance(result, dict) and isinstance(result.get("source"), dict),
+        "SSH",
+        "missing source inputs",
+    )
+    source = result["source"]
+    require(set(source) == {"bridge", "storage", "vlan"}, "SSH", "invalid source inputs")
+    resolved = dict(request, **source)
+    try:
+        template_host.validate_request(resolved)
+    except template_host.TemplateError as error:
+        raise ValidationError("SSH: invalid resolved source inputs") from error
     require(
         isinstance(result, dict)
         and set(result) == keys
         and result["profile"] == request["profile"]
         and type(result["template_vmid"]) is int
         and result["template_vmid"] == request["template_vmid"]
-        and result["identity"] == template_host.identity(request),
+        and result["identity"] == template_host.identity(resolved),
         "SSH",
         "template result identity mismatch; inspect host state",
+    )
+    require(
+        result["action"] not in {"created", "would-create"}
+        or source == {key: request[key] for key in ("bridge", "storage", "vlan")},
+        "SSH",
+        "new template inputs differ from requested defaults",
     )
     allowed = (
         {"preserved", "created", "resumed"} if request["apply"] else {"preserved", "would-create"}
@@ -214,7 +240,7 @@ def dispatch(host, request):
         "SSH",
         "invalid template outcome; inspect host state",
     )
-    return result
+    return {key: value for key, value in result.items() if key != "source"}
 
 
 def main():

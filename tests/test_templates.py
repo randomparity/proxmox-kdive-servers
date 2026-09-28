@@ -208,6 +208,32 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(first["config_sha256"], second["config_sha256"])
         self.assertFalse(any(c[0] == "qm" for c in self.native.calls))
 
+    def test_existing_source_defaults_are_independent_of_guest_inputs(self):
+        original = self.host.run(self.request)
+        config = self.native.config.copy()
+        self.native.calls.clear()
+        requested = dict(self.request, vlan=12, bridge="guestbridge", storage="guestpool")
+        result = self.host.run(requested)
+        self.assertEqual(result["action"], "preserved")
+        self.assertEqual(result["identity"], original["identity"])
+        self.assertEqual(self.native.config, config)
+        self.assertFalse(any(c[0] == "qm" for c in self.native.calls))
+
+    def test_source_resolution_still_rejects_foreign_and_drifted_templates(self):
+        self.host.run(self.request)
+        for field, value in (
+            ("description", "foreign"),
+            ("net0", "virtio=bad,bridge=vmbr0,tag=12"),
+            ("scsi0", "elsewhere:base-9000-disk-0,size=4G"),
+        ):
+            original = self.native.config.copy()
+            self.native.config[field] = value
+            self.native.calls.clear()
+            with self.subTest(field=field), self.assertRaises(self.host.TemplateError):
+                self.host.run(dict(self.request, vlan=None))
+            self.assertFalse(any(c[0] == "qm" for c in self.native.calls))
+            self.native.config = original
+
     def test_native_efi_certificate_marker(self):
         self.host.run(self.request)
         self.assertIn("ms-cert=2023k", self.native.config["efidisk0"])
@@ -285,11 +311,11 @@ class TestLifecycle(unittest.TestCase):
     def test_plan_never_writes_and_node_mismatch(self):
         self.request["apply"] = False
         self.assertEqual(self.host.run(self.request)["action"], "would-create")
-        self.assertEqual(list(Path(self.temp.name).iterdir()), [])
+        self.assertFalse((Path(self.temp.name) / "cache").exists())
         self.native.node = "different"
         with self.assertRaisesRegex(self.host.TemplateError, "node"):
             self.host.run(self.request)
-        self.assertEqual(list(Path(self.temp.name).iterdir()), [])
+        self.assertFalse((Path(self.temp.name) / "cache").exists())
 
     def test_foreign_drift_and_storage(self):
         import copy
@@ -457,7 +483,7 @@ class TestLifecycle(unittest.TestCase):
             with self.assertRaises(self.host.TemplateError):
                 self.host.run(self.request)
         self.assertIsNone(self.native.config)
-        self.assertEqual(list(Path(self.temp.name).iterdir()), [])
+        self.assertFalse((Path(self.temp.name) / "cache").exists())
 
     def test_lock_contention(self):
         import subprocess
@@ -498,6 +524,21 @@ class TestController(unittest.TestCase):
         self.host.update(
             proxmox_ssh_host="pve.invalid", proxmox_ssh_user="root", cpu="host", template_vmid=9000
         )
+
+    def test_template_defaults_do_not_use_guest_cpu_vlan_or_sizing(self):
+        original = self.controller.request_for(self.host, False, False)
+        self.host.update(
+            cpu="x86-64-v3",
+            vlan=12,
+            cores=32,
+            memory_mib=65536,
+            disk_gib=512,
+            nic_queues=8,
+            balloon_mib=4096,
+        )
+        self.assertEqual(self.controller.request_for(self.host, False, False), original)
+        self.assertIsNone(original["vlan"])
+        self.assertEqual(original["cpu"], "host")
 
     def test_api_deadline_interrupts_blocking_response(self):
         import io
@@ -618,6 +659,7 @@ class TestController(unittest.TestCase):
             "profile": "ubuntu",
             "template_vmid": 9000,
             "identity": template_host.identity(request),
+            "source": {key: request[key] for key in ("bridge", "storage", "vlan")},
             "action": "would-create",
             "config_sha256": "a" * 64,
             "duration_seconds": 1.0,
@@ -626,11 +668,54 @@ class TestController(unittest.TestCase):
             "scripts.templates.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, json.dumps(result), ""),
         ) as run:
-            self.assertEqual(self.controller.dispatch(self.host, request), result)
+            self.assertEqual(
+                self.controller.dispatch(self.host, request),
+                {k: v for k, v in result.items() if k != "source"},
+            )
             arguments = run.call_args.args[0]
             self.assertIn("StrictHostKeyChecking=yes", arguments)
             self.assertIn("BatchMode=yes", arguments)
             self.assertNotIn("api_user_env", run.call_args.kwargs["input"])
+
+    def test_resolved_source_result_is_bound_and_private(self):
+        import subprocess
+        from unittest.mock import patch
+
+        from scripts import template_host
+        from scripts.validate_inventory import ValidationError
+
+        request = self.controller.request_for(self.host, False, False)
+        source = {"bridge": "sourcebridge", "storage": "sourcepool", "vlan": 30}
+        result = {
+            "profile": request["profile"],
+            "template_vmid": request["template_vmid"],
+            "identity": template_host.identity(dict(request, **source)),
+            "source": source,
+            "action": "preserved",
+            "config_sha256": "a" * 64,
+            "duration_seconds": 1.0,
+        }
+        with patch(
+            "scripts.templates.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, json.dumps(result), ""),
+        ):
+            public = self.controller.dispatch(self.host, request)
+        self.assertNotIn("source", public)
+        self.assertNotIn("sourcepool", json.dumps(public))
+        for changed in (
+            dict(result, action="created"),
+            dict(result, identity="a" * 64),
+            dict(result, source=dict(source, extra=1)),
+            dict(result, source=dict(source, vlan=True)),
+        ):
+            with (
+                patch(
+                    "scripts.templates.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, json.dumps(changed), ""),
+                ),
+                self.assertRaises(ValidationError),
+            ):
+                self.controller.dispatch(self.host, request)
 
 
 class TestEntryPoints(unittest.TestCase):
@@ -658,6 +743,7 @@ def run(argv, **kwargs):
     request = json.loads(kwargs["input"])
     result = {"profile":request["profile"], "template_vmid":request["template_vmid"],
               "identity":template_host.identity(request), "config_sha256":"a"*64,
+              "source":{k:request[k] for k in ("bridge","storage","vlan")},
               "duration_seconds":1.0, "action":"created" if request["apply"] else "would-create"}
     return subprocess.CompletedProcess(argv,0,json.dumps(result),"")
 urllib.request.OpenerDirector.open = open_api

@@ -151,8 +151,10 @@ Other groups may coexist, but these checks only validate managed `kdive` hosts.
 | `gateway`, `dns_servers` | Different usable gateway in the subnet; non-empty IPv4 DNS list |
 | `ansible_user`, `ssh_public_keys` | Guest account and non-empty OpenSSH public-key list (Ed25519/RSA/NIST ECDSA) |
 | `cores`, `memory_mib`, `disk_gib` | Positive integer sizing, at most 2147483647; no Boolean/string coercion |
-| `vlan` | Optional integer 1–4094; desired guest NIC tag for provisioning, template NIC tag for template operations |
-| `template_vmid`, `cpu` | Explicit template ID 100–999999999 and literal `host` CPU |
+| `vlan` | Optional integer 1–4094; guest NIC tag; omit for an untagged guest |
+| `nic_model`, `nic_queues` | NIC model (default `virtio`); optional integer 0–64 queues, only for virtio |
+| `balloon_mib` | Balloon target in MiB, default `memory_mib`; 0 disables, otherwise at most `memory_mib` |
+| `template_vmid`, `cpu` | Explicit template ID 100–999999999 and guest CPU model name; `host` is the default example |
 | `proxmox_ssh_host`, `proxmox_ssh_user`, `proxmox_ssh_port` | Native host SSH endpoint, root-capable login, port default 22 |
 | `proxmox_ssh_private_key_file` | Optional private-key path; blank/omitted uses normal SSH identities |
 | `proxmox_api_ca_file` | Optional CA bundle path; blank/omitted uses system trust |
@@ -248,11 +250,13 @@ extent size. Admission rounds the root and auxiliary reservations to that geomet
 disk readback accepts only bounded, extent-aligned allocations. ZFS retains its native
 allocation checks. An unavailable or malformed extent report fails before allocation.
 
-Assign explicit unused template IDs and CPU `host`. Template validation permits
+Assign explicit unused template IDs. Template CPU/RAM/NIC values are placeholders;
+guest CPU, sizing, networking and storage come from inventory. Template validation permits
 unassigned guest `vmid`, `ansible_host`, `ipv4_cidr`, `gateway` and `dns_servers`;
 operator-assigned static IPv4 addresses and resolver IPs are required before guest
 provisioning. Guest validation remains strict. A shared template ID requires identical
-profile/node/storage/bridge/VLAN/CPU and endpoint inputs throughout the inventory.
+profile/node and endpoint inputs throughout the inventory; guest hardware, destination
+storage and network settings may differ.
 Provided guest IDs must be unique and cannot overlap any template ID.
 
 ```sh
@@ -288,12 +292,15 @@ No API credentials travel over SSH. Failures preserve private input values, repo
 nonzero status and, when observable, the residual ownership phase.
 
 All profiles use OVMF with enrolled secure-boot keys, `host` CPU, two cores, 2048 MiB,
-virtio SCSI, serial console and NoCloud media. VLAN tags come directly from inventory.
+virtio SCSI, serial console and NoCloud media. New templates have untagged placeholder
+NICs. Existing templates retain their original verified bridge, VLAN and storage,
+even when the guest inventory requests different values. Template operations never
+rewrite source defaults or ownership markers to match guest settings.
 Images remain unmodified and unbooted. Their full vendor checksum, exact byte length,
 QCOW2 format, virtual size and absence of backing/encryption/external data are checked
 before import. Matching ready reruns verify description identity, hardware, stopped
 state, exact owned disks and native capabilities without changing Proxmox resources.
-Image, baseline or template configuration changes require a new explicit VMID;
+Source image, baseline or actual template drift requires a new explicit VMID;
 there is no automatic replacement or deletion command.
 
 An interrupted creation is refused on an ordinary rerun. After inspecting private
@@ -332,9 +339,8 @@ API and revalidates its exact immutable identity and configuration through nativ
 The guest's requested VLAN is bound separately and applied while preserving the cloned
 NIC's MAC address. Tagged and untagged guests can share a source template without
 changing that template. The API token therefore needs selected-template configuration
-audit access as well as node/storage visibility. Template-only operations still use
-their supplied VLAN as an immutable template input; retain the original template inputs
-when operating that lifecycle.
+audit access as well as node/storage visibility. Template operations resolve the same original source settings, so the same guest
+inventory works for both template checks and provisioning.
 
 Keep the private inventory directory mode 0700. Provisioning creates its
 `known_hosts` file mode 0600 for guest SSH pins. Fresh owned clones use OpenSSH
@@ -374,8 +380,20 @@ never reconfigured or rebooted, and there is no TCG fallback.
 
 Native cooperating locks serialize allocations and selected VM/template operations
 through readiness. Full clones receive exact hardware/static networking, optional
-VLAN, keys, `host` CPU, guest agent, no ballooning, no automatic startup and no
-general cloud-init package upgrade. Root filesystem growth is verified after boot.
+VLAN, NIC model/queues, keys, selected CPU model, guest agent and balloon device,
+with no automatic startup or general cloud-init package upgrade. Root filesystem growth is verified after boot.
+Guest configuration is applied explicitly before boot: template defaults do not
+select the guest CPU model, NIC, destination bridge/storage or cloud-init values.
+The CPU model must expose working nested KVM; there is no emulation fallback.
+
+Ballooning is enabled by default with target equal to configured RAM. Set
+`balloon_mib` lower to allow reclaiming memory, or set it to 0 to disable the device.
+Admission still reserves maximum configured RAM; ballooning does not authorize
+memory overcommit. Verification requires a bound guest `virtio_balloon` driver when
+enabled and checks observed RAM against the configured balloon target and maximum.
+NIC queues use the native default when omitted; explicit `nic_queues` is verified
+exactly and requires `nic_model: virtio`. NIC model names follow Proxmox's supported
+models, including `virtio`, `e1000`, `e1000e` and `vmxnet3`.
 Before first start, provisioning replaces only the clone's generated IDE cloud-init
 seed with a generated `scsi1` seed on its VirtIO SCSI controller. Native removal
 frees the old seed volume; creation regenerates it from inventory. Root and EFI
@@ -413,9 +431,9 @@ cannot authorize preparation merely by accepting the configured SSH credential.
 The UUID and boot identity travel privately and are excluded from public evidence.
 RAM evidence reports usable `memory_bytes` and measured `crash_reserved_bytes`
 separately. Allocation proof requires their sum to be at least 90% of configured
-RAM, without changing the image's crash-kernel settings. Only the native sysfs
-reservation counts, capped at 512 MiB and one quarter of configured RAM; their
-sum cannot exceed configured RAM. Missing crash-reservation support counts as
+RAM (or the positive balloon target), without changing the image's crash-kernel
+settings. Only the native sysfs reservation counts, capped at 512 MiB and one quarter of configured RAM; their
+sum cannot exceed maximum configured RAM. Missing crash-reservation support counts as
 zero; malformed or unreadable evidence fails.
 
 Matching ready reruns perform verification only: they do not restart a stopped
