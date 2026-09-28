@@ -12,6 +12,7 @@ import select
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -568,11 +569,192 @@ def reboot(request, previous_boot):
     return {"reboot_requested": True}
 
 
+# Production levels are added in dependency order by their owning changes.
+LEVELS = ()
+LEVEL_DIRECTORY = Path("/var/lib/kdive-levels")
+
+
+def level_chain(level):
+    chain, parent = [], "clean"
+    for item in LEVELS:
+        check(
+            isinstance(item, dict)
+            and set(item) == {"name", "parent", "prepare", "check"}
+            and isinstance(item["name"], str)
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,39}", item["name"])
+            and item["name"] not in {"clean", "current", *(i["name"] for i in chain)}
+            and item["parent"] == parent
+            and callable(item["prepare"])
+            and callable(item["check"]),
+            "Invalid closed level registry; repair installed code",
+        )
+        chain.append(item)
+        parent = item["name"]
+    if level == "clean":
+        return []
+    for index, item in enumerate(chain):
+        if item["name"] == level:
+            return chain[: index + 1]
+    raise GuestError("Unknown level; select a level implemented by this checkout")
+
+
+def level_json(value):
+    def pairs(items):
+        result = {}
+        for key, item in items:
+            check(key not in result, "Duplicate level metadata field; inspect manifest")
+            result[key] = item
+        return result
+
+    def invalid(value):
+        raise GuestError("Non-finite level metadata; inspect manifest")
+
+    check(isinstance(value, str) and len(value.encode()) <= 65536, "Level metadata exceeds bound")
+    try:
+        return json.loads(value, object_pairs_hook=pairs, parse_constant=invalid)
+    except (ValueError, RecursionError):
+        raise GuestError("Invalid level metadata; inspect manifest") from None
+
+
+def level_equal(left, right):
+    # Python equality conflates JSON booleans, integers and floats.
+    return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(
+        right, sort_keys=True, allow_nan=False
+    )
+
+
+def level_metadata(metadata, name, parent, identity, config_sha256):
+    item = level_chain(name)[-1]
+    check(
+        isinstance(metadata, dict)
+        and set(metadata)
+        == {"schema", "level", "parent", "parent_identity", "identity", "config_sha256", "content"}
+        and type(metadata["schema"]) is int
+        and metadata["schema"] == 1
+        and metadata["level"] == name
+        and metadata["parent"] == item["parent"]
+        and metadata["identity"] == identity
+        and metadata["config_sha256"] == config_sha256
+        and isinstance(metadata["content"], dict),
+        "Level metadata identity/configuration differs; re-prepare selected level",
+    )
+    expected = hashlib.sha256(
+        json.dumps(parent, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    check(
+        metadata["parent_identity"] == expected,
+        "Level parent identity differs; re-prepare selected level",
+    )
+    level_json(json.dumps(metadata, allow_nan=False))
+
+
+def level_manifest(name, metadata, write=False):
+    check(
+        isinstance(name, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,39}", name),
+        "Invalid manifest name",
+    )
+    if write:
+        LEVEL_DIRECTORY.mkdir(mode=0o755, exist_ok=True)
+    directory = os.open(LEVEL_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory)
+        check(info.st_uid == 0 and not info.st_mode & 0o022, "Unsafe level manifest directory")
+        filename = name + ".json"
+        try:
+            fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            check(write, "Level manifest missing; restore or re-prepare selected level")
+        else:
+            with os.fdopen(fd) as stream:
+                info = os.fstat(stream.fileno())
+                check(
+                    stat.S_ISREG(info.st_mode)
+                    and info.st_uid == 0
+                    and stat.S_IMODE(info.st_mode) == 0o644,
+                    "Unsafe level manifest file",
+                )
+                check(
+                    level_equal(level_json(stream.read(65537)), metadata),
+                    "Guest and snapshot level metadata differ; restore selected level",
+                )
+            return
+        payload = json.dumps(metadata, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        level_json(payload)
+        fd, temporary = tempfile.mkstemp(prefix=".level-", dir=LEVEL_DIRECTORY)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(payload + "\n")
+                stream.flush()
+                os.fchmod(stream.fileno(), 0o644)
+                os.fsync(stream.fileno())
+            os.replace(temporary, filename, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    finally:
+        os.close(directory)
+
+
+def run_level(request, operation, name, chain, proposed):
+    check(operation in {"verify", "prepare"}, "Invalid level operation")
+    entries = level_chain(name)
+    check(entries and isinstance(chain, list), "Invalid level chain")
+    count = len(entries) if operation == "prepare" else len(entries) + 1
+    check(len(chain) == count and isinstance(chain[0], dict), "Incomplete level chain")
+    parent = chain[0]
+    check(
+        set(parent) == {"schema", "identity", "config_sha256"}
+        and type(parent["schema"]) is int
+        and parent["schema"] == 1,
+        "Invalid clean level metadata",
+    )
+    for field in ("identity", "config_sha256"):
+        check(
+            isinstance(parent[field], str) and re.fullmatch(r"[a-f0-9]{64}", parent[field]),
+            "Invalid clean metadata digest",
+        )
+    for item, metadata in zip(entries, chain[1:], strict=False):
+        level_metadata(
+            metadata, item["name"], parent, chain[0]["identity"], chain[0]["config_sha256"]
+        )
+        parent = metadata
+    if operation == "prepare":
+        level_metadata(proposed, name, parent, chain[0]["identity"], chain[0]["config_sha256"])
+        check(proposed["content"] == {}, "Unexpected proposed level content")
+    else:
+        check(proposed is None, "Unexpected verification metadata")
+    run(request, fresh=False)
+    for item, metadata in zip(entries, chain[1:], strict=False):
+        level_manifest(item["name"], metadata)
+        item["check"](request, metadata["content"])
+    if operation == "verify":
+        return {"verified": True}
+    metadata = dict(proposed, content=entries[-1]["prepare"](request))
+    level_metadata(metadata, name, parent, chain[0]["identity"], chain[0]["config_sha256"])
+    level_manifest(name, metadata, write=True)
+    entries[-1]["check"](request, metadata["content"])
+    level_manifest(name, metadata)
+    # Preparation must not invalidate the parent checks or baseline readiness.
+    run(request, fresh=False)
+    for item, ancestor in zip(entries, chain[1:], strict=False):
+        level_manifest(item["name"], ancestor)
+        item["check"](request, ancestor["content"])
+    return {"metadata": metadata}
+
+
 def main():
     try:
         envelope = json.loads(sys.stdin.read(65537))
         check(isinstance(envelope, dict), "Invalid guest request")
-        if set(envelope) == {"request", "reboot_from"}:
+        if set(envelope) == {"request", "level_operation", "level", "chain", "proposed"}:
+            result = run_level(
+                envelope["request"],
+                envelope["level_operation"],
+                envelope["level"],
+                envelope["chain"],
+                envelope["proposed"],
+            )
+        elif set(envelope) == {"request", "reboot_from"}:
             result = reboot(envelope["request"], envelope["reboot_from"])
         else:
             check(

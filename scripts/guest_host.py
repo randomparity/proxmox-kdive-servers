@@ -312,7 +312,7 @@ def inspect_guest(request, phase="ready", running=True, seed_pending=False):
     return config
 
 
-def admission(requests, mode="apply"):
+def admission(requests, mode="apply", level="clean"):
     check(isinstance(requests, list) and 0 < len(requests) <= 100, "Invalid selected batch")
     for request in requests:
         validate_request(request)
@@ -360,7 +360,15 @@ def admission(requests, mode="apply"):
     for request, present in zip(requests, existing, strict=True):
         if present:
             config = inspect_guest(request, running=None if mode.endswith("restore") else True)
-            baseline(request, config)
+            if mode.endswith("level"):
+                prepare_admission(request, config, level)
+            elif mode.endswith("restore"):
+                rollback_admission(request, config, level)
+            else:
+                baseline(request, config, level)
+    if mode.endswith("level"):
+        check(all(existing), "Level preparation requires existing owned guests")
+        return existing
     if mode.endswith("restore"):
         check(all(existing), "Restore requires existing owned guests and clean baseline")
         return existing
@@ -583,7 +591,7 @@ def snapshot_rows(request):
     return result
 
 
-def baseline(request, config):
+def clean_baseline(request, config):
     rows = snapshot_rows(request)
     check(
         "clean" in rows, "Clean baseline missing; explicitly teardown and recreate selected guest"
@@ -622,6 +630,159 @@ def baseline(request, config):
         "snapshot_config_sha256": metadata["config_sha256"],
         "snapshot_time": row["snaptime"],
     }
+
+
+def level_metadata_chain(request, config, level):
+    entries = guest_verify.level_chain(level)
+    evidence = clean_baseline(request, config)
+    rows = snapshot_rows(request)
+    clean = guest_verify.level_json(rows["clean"]["description"])
+    check(
+        template_host.digest(clean) == evidence["snapshot_identity"],
+        "Clean metadata changed during admission",
+    )
+    chain = [clean]
+    for item in entries:
+        name = item["name"]
+        check(
+            name in rows,
+            "Level snapshot missing; prepare and ask operator to capture selected level",
+        )
+        row = rows[name]
+        check(
+            type(row.get("snaptime")) is int
+            and row["snaptime"] > 0
+            and row.get("vmstate") == 0
+            and "snapstate" not in row,
+            "Incomplete or RAM level snapshot; inspect and re-prepare",
+        )
+        snapshot = native(base_path(request) + "/snapshot/" + name + "/config")
+        metadata = guest_verify.level_json(row.get("description"))
+        guest_verify.level_metadata(
+            metadata, name, chain[-1], identity(request), clean["config_sha256"]
+        )
+        check(
+            isinstance(snapshot, dict)
+            and snapshot.get("description") == row["description"]
+            and snapshot.get("snaptime") == row["snaptime"]
+            and normalized_config(snapshot, snapshot=True) == normalized_config(config),
+            "Level snapshot configuration differs; re-prepare selected level",
+        )
+        check(
+            row.get("parent") == item["parent"] and snapshot.get("parent") == item["parent"],
+            "Level native parent differs; re-prepare selected level",
+        )
+        chain.append(metadata)
+    return chain
+
+
+def baseline(request, config, level="clean"):
+    if level == "clean":
+        return clean_baseline(request, config)
+    metadata = level_metadata_chain(request, config, level)[-1]
+    row = snapshot_rows(request)[level]
+    check(
+        guest_verify.level_equal(guest_verify.level_json(row["description"]), metadata),
+        "Level metadata changed during admission",
+    )
+    return {
+        "snapshot": level,
+        "snapshot_identity": template_host.digest(metadata),
+        "snapshot_config_sha256": metadata["config_sha256"],
+        "snapshot_time": row["snaptime"],
+    }
+
+
+def rollback_admission(request, config, level):
+    baseline(request, config, level)
+    h = request["host"]
+    storage = native(f"/nodes/{h['proxmox_node']}/storage/{h['storage']}/status")
+    check(
+        isinstance(storage, dict) and storage.get("type") in {"zfspool", "lvmthin"},
+        "Unknown rollback storage; inspect native storage",
+    )
+    if storage["type"] == "zfspool":
+        rows = snapshot_rows(request)
+        target = rows[level]["snaptime"]
+        check(
+            all(type(row.get("snaptime")) is int and row["snaptime"] > 0 for row in rows.values()),
+            "Invalid ZFS snapshot times; inspect native snapshots",
+        )
+        check(
+            not any(
+                name != level and (row["snaptime"] >= target or row.get("parent") == level)
+                for name, row in rows.items()
+            ),
+            "ZFS rollback blocked by newer snapshots; "
+            "operator must inspect and remove them before retry",
+        )
+
+
+def prepare_admission(request, config, level):
+    entries = guest_verify.level_chain(level)
+    check(entries, "Clean preparation is fresh provisioning only")
+    parent = entries[-1]["parent"]
+    baseline(request, config, parent)
+    check(
+        config.get("parent") == parent, "Current guest parent differs; restore parent level first"
+    )
+    check(
+        level not in snapshot_rows(request),
+        "Level snapshot already exists; operator must remove it before re-preparation",
+    )
+
+
+def level_exchange(request, config, level, prepare=False):
+    parent = guest_verify.level_chain(level)[-1]["parent"] if prepare else level
+    chain = level_metadata_chain(request, config, parent)
+    proposed = None
+    if prepare:
+        proposed = {
+            "schema": 1,
+            "level": level,
+            "parent": parent,
+            "parent_identity": template_host.digest(chain[-1]),
+            "identity": identity(request),
+            "config_sha256": chain[0]["config_sha256"],
+            "content": {},
+        }
+    emit(
+        request,
+        "levels",
+        guest_uuid=guest_verify.machine_uuid(
+            template_host.properties(config.get("smbios1")).get("uuid")
+        ),
+        level=level,
+        prepare=prepare,
+        chain=chain,
+        proposed=proposed,
+    )
+    ack = read_line(2500)
+    if prepare:
+        check(isinstance(ack, dict) and "metadata" in ack, "Missing prepared level metadata")
+        metadata = ack.pop("metadata")
+        guest_verify.level_metadata(
+            metadata, level, chain[-1], identity(request), chain[0]["config_sha256"]
+        )
+    verify_ack(request, ack, phase="levels")
+    current = inspect_guest(request)
+    check(
+        normalized_config(current) == normalized_config(config), "Guest changed during level checks"
+    )
+    if not prepare:
+        check(
+            guest_verify.level_equal(level_metadata_chain(request, current, level), chain),
+            "Level chain changed during guest checks",
+        )
+        return None
+    prepare_admission(request, current, level)
+    stopped = shutdown_guest(request, current)
+    prepare_admission(request, stopped, level)
+    check(
+        guest_verify.level_equal(level_metadata_chain(request, stopped, parent), chain),
+        "Parent metadata changed during preparation",
+    )
+    return metadata
 
 
 def shutdown_guest(request, config, phase="ready"):
@@ -711,15 +872,15 @@ def inspect_removable(request):
     return config, phase
 
 
-def lifecycle(request, mode):
+def lifecycle(request, mode, level="clean"):
     vmid = str(request["host"]["vmid"])
     if mode == "restore":
         config = inspect_guest(request, running=None)
-        baseline(request, config)
+        rollback_admission(request, config, level)
         stopped = shutdown_guest(request, config)
-        baseline(request, stopped)
-        command(["qm", "rollback", vmid, "clean", "--start", "0"], timeout=1800)
-        baseline(request, inspect_guest(request, running=False))
+        rollback_admission(request, stopped, level)
+        command(["qm", "rollback", vmid, level, "--start", "0"], timeout=1800)
+        baseline(request, inspect_guest(request, running=False), level)
         command(["qm", "start", vmid], timeout=180)
         return verify_readiness(request, fresh=False)
     config, phase = inspect_removable(request)
@@ -747,14 +908,34 @@ def lifecycle(request, mode):
     return None
 
 
-def session(requests, mode, confirmed=False, exclusive=False):
+def session(requests, mode, confirmed=False, exclusive=False, level="clean"):
     check(
-        mode in {"plan", "apply", "verify", "restore", "teardown", "plan-restore", "plan-teardown"},
+        mode
+        in {
+            "plan",
+            "apply",
+            "verify",
+            "restore",
+            "teardown",
+            "plan-restore",
+            "plan-teardown",
+            "level",
+            "plan-level",
+        },
         "Invalid guest operation",
+    )
+    guest_verify.level_chain(level)
+    check(
+        level == "clean" or mode in {"verify", "restore", "plan-restore", "level", "plan-level"},
+        "LEVEL is only supported for verify, restore and level",
+    )
+    check(
+        not mode.endswith("level") or level != "clean",
+        "Clean preparation is fresh provisioning only",
     )
     check(type(confirmed) is bool and type(exclusive) is bool, "Invalid destructive intent")
     check(
-        mode not in {"restore", "teardown"} or confirmed and exclusive,
+        mode not in {"restore", "teardown", "level"} or confirmed and exclusive,
         "Destructive operation requires exact selected confirmation and exclusive use",
     )
     check(isinstance(requests, list) and 0 < len(requests) <= 100, "Invalid selected batch")
@@ -767,7 +948,7 @@ def session(requests, mode, confirmed=False, exclusive=False):
                 {r["host"][key] for r in requests for key in ("vmid", "template_vmid")}
             ):
                 locks.enter_context(template_host.template_lock(vmid))
-        existing = admission(requests, mode)
+        existing = admission(requests, mode, level)
         check(mode != "verify" or all(existing), "Verify requires existing ready guests")
         for request, present in zip(requests, existing, strict=True):
             started = time.monotonic()
@@ -775,6 +956,7 @@ def session(requests, mode, confirmed=False, exclusive=False):
                 action = {
                     "plan": "preserved" if present else "would-create",
                     "plan-restore": "would-restore",
+                    "plan-level": "would-prepare-level",
                     "plan-teardown": "would-destroy" if present else "absent",
                 }[mode]
                 emit(request, "planned", action=action)
@@ -790,13 +972,19 @@ def session(requests, mode, confirmed=False, exclusive=False):
                 )
                 continue
             if mode == "restore":
-                config = lifecycle(request, mode)
+                config = lifecycle(request, mode, level)
             else:
                 if not present:
                     clone(request)
                 config = verify_readiness(request, fresh=not present)
                 if not present:
                     config = capture_baseline(request, config)
+            if mode == "level":
+                metadata = level_exchange(request, config, level, prepare=True)
+                emit(request, "snapshot-ready", level=level, metadata=metadata)
+                continue
+            if level != "clean":
+                level_exchange(request, config, level)
             action = "preserved" if present else "created"
             if mode == "restore":
                 action = "restored"
@@ -806,7 +994,7 @@ def session(requests, mode, confirmed=False, exclusive=False):
                 action=action,
                 config_sha256=template_host.digest(config),
                 duration_seconds=round(time.monotonic() - started, 3),
-                **baseline(request, config),
+                **baseline(request, config, level),
             )
 
 
@@ -815,11 +1003,15 @@ def main():
         envelope = read_line(30)
         check(
             isinstance(envelope, dict)
-            and set(envelope) == {"requests", "mode", "confirmed", "exclusive"},
+            and set(envelope) == {"requests", "mode", "confirmed", "exclusive", "level"},
             "Invalid native guest envelope",
         )
         session(
-            envelope["requests"], envelope["mode"], envelope["confirmed"], envelope["exclusive"]
+            envelope["requests"],
+            envelope["mode"],
+            envelope["confirmed"],
+            envelope["exclusive"],
+            envelope["level"],
         )
     except (GuestError, guest_verify.GuestError) as error:
         print(json.dumps({"error": str(error)}), flush=True)

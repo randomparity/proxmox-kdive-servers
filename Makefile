@@ -12,9 +12,10 @@ ifneq ($(origin TARGETS), undefined)
 export TARGETS
 endif
 
-export CONFIRM EXCLUSIVE
+LEVEL ?= clean
+export CONFIRM EXCLUSIVE LEVEL
 
-.PHONY: setup hooks lint syntax validate templates provision verify restore teardown test check
+.PHONY: setup hooks lint syntax validate templates provision verify restore teardown level test check
 
 setup:
 	uv sync --locked
@@ -47,6 +48,9 @@ provision:
 
 verify:
 	.venv/bin/python scripts/guests.py --verify
+
+level:
+	.venv/bin/python scripts/guests.py --prepare-level
 
 restore:
 	.venv/bin/python scripts/guests.py --restore
