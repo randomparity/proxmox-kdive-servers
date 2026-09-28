@@ -494,9 +494,7 @@ class TestController(unittest.TestCase):
         from scripts.validate_inventory import load_inventory
 
         self.controller = templates
-        self.host = load_inventory(ROOT / "inventory/example.yml")["_meta"]["hostvars"][
-            "ubuntu_local"
-        ]
+        self.host = load_inventory(ROOT / "inventory/example.yml")["_meta"]["hostvars"]["ubuntu"]
         self.host.update(
             proxmox_ssh_host="pve.invalid", proxmox_ssh_user="root", cpu="host", template_vmid=9000
         )
@@ -683,7 +681,7 @@ subprocess.run = run
             )
             self.assertNotEqual(result.returncode, 0)
             for apply in [False, True]:
-                selected = dict(env, TARGETS="ubuntu_local")
+                selected = dict(env, TARGETS="ubuntu")
                 if apply:
                     selected["APPLY"] = "1"
                 result = subprocess.run(

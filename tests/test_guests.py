@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def request():
-    host = managed_hosts(load_inventory(ROOT / "inventory/example.yml"))["ubuntu_local"]
+    host = managed_hosts(load_inventory(ROOT / "inventory/example.yml"))["ubuntu"]
     host.update(storage="pool", cores=2, memory_mib=4096, disk_gib=32)
     host.pop("vlan", None)
     source = {
@@ -267,7 +267,7 @@ class TestGuestVerifier(unittest.TestCase):
                     ),
                     patch.object(guest_verify.platform, "system", return_value="Linux"),
                     patch.object(guest_verify.platform, "machine", return_value="x86_64"),
-                    patch.object(guest_verify.socket, "gethostname", return_value="ubuntu-local"),
+                    patch.object(guest_verify.socket, "gethostname", return_value="ubuntu"),
                     patch.object(
                         guest_verify.socket,
                         "getfqdn",
@@ -372,7 +372,7 @@ class TestGuestVerifier(unittest.TestCase):
             "os_id": "ubuntu",
             "release": "24.04",
             "architecture": "x86_64",
-            "hostname": "ubuntu-local",
+            "hostname": "ubuntu",
             "fqdn": req["host"]["fqdn"],
             "ipv4": [req["host"]["ansible_host"]],
             "cpus": 2,
@@ -1344,7 +1344,7 @@ class TestController(unittest.TestCase):
                     "--inventory",
                     "/private/${HOME}/inventory.yml",
                     "--targets",
-                    "ubuntu_local",
+                    "ubuntu",
                     "--apply",
                 ],
             ),

@@ -24,16 +24,16 @@ class TestValidation(unittest.TestCase):
 
     def setUp(self):
         self.data = copy.deepcopy(self.example)
-        self.host = self.data["_meta"]["hostvars"]["ubuntu_local"]
+        self.host = self.data["_meta"]["hostvars"]["ubuntu"]
 
     def test_valid_and_independent_selection(self):
         self.assertEqual(validate_inventory(self.data), 4)
-        self.assertEqual(validate_inventory(self.data, "ubuntu_local,fedora_remote"), 2)
+        self.assertEqual(validate_inventory(self.data, "ubuntu,fedora"), 2)
         self.host["profile"] = "fedora"
         self.assertEqual(validate_inventory(self.data), 4)
 
     def test_shared_template_allows_independent_guest_vlan_only(self):
-        other = self.data["_meta"]["hostvars"]["fedora_remote"]
+        other = self.data["_meta"]["hostvars"]["fedora"]
         other.update(
             profile=self.host["profile"], template_vmid=self.host["template_vmid"], vlan=25
         )
@@ -124,7 +124,7 @@ class TestValidation(unittest.TestCase):
                 del self.host[field]
 
     def test_global_collisions_even_when_unselected(self):
-        other = self.data["_meta"]["hostvars"]["rocky_local"]
+        other = self.data["_meta"]["hostvars"]["rocky"]
         for field in ["vmid", "ansible_host"]:
             with self.subTest(field=field):
                 original = other[field]
@@ -133,12 +133,12 @@ class TestValidation(unittest.TestCase):
                 if field == "ansible_host":
                     other["ipv4_cidr"] = self.host["ipv4_cidr"]
                 with self.assertRaisesRegex(ValidationError, "unique"):
-                    validate_inventory(self.data, "fedora_remote")
+                    validate_inventory(self.data, "fedora")
                 other[field] = original
                 other["ipv4_cidr"] = cidr
 
     def test_selection_rejects_empty_patterns_duplicates_and_unknowns(self):
-        for selection in ["", "all", "*", "missing", "ubuntu_local,", "ubuntu_local,ubuntu_local"]:
+        for selection in ["", "all", "*", "missing", "ubuntu,", "ubuntu,ubuntu"]:
             with self.subTest(selection=selection), self.assertRaises(ValidationError):
                 validate_inventory(self.data, selection)
 
@@ -160,11 +160,11 @@ class TestValidation(unittest.TestCase):
 
     def test_nested_groups_and_nonmanaged_hosts(self):
         hosts = self.data["kdive"].pop("hosts")
-        self.data["kdive"]["children"] = ["lane_local"]
-        self.data["lane_local"] = {"hosts": hosts}
+        self.data["kdive"]["children"] = ["test_guests"]
+        self.data["test_guests"] = {"hosts": hosts}
         self.data["_meta"]["hostvars"]["unrelated"] = {"vmid": self.host["vmid"]}
         self.assertEqual(validate_inventory(self.data), 4)
-        self.data["lane_local"]["hosts"] = []
+        self.data["test_guests"]["hosts"] = []
         with self.assertRaises(ValidationError):
             validate_inventory(self.data)
 
@@ -192,14 +192,14 @@ class TestValidation(unittest.TestCase):
                 self.host["fqdn"] = value
                 validate_inventory(self.data)
         self.host["fqdn"] = original
-        self.data["_meta"]["hostvars"]["rocky_local"]["fqdn"] = original
+        self.data["_meta"]["hostvars"]["rocky"]["fqdn"] = original
         with self.assertRaisesRegex(ValidationError, "unique"):
-            validate_inventory(self.data, "fedora_remote")
+            validate_inventory(self.data, "fedora")
 
     def test_guest_validation_checks_template_collisions(self):
-        self.host["vmid"] = self.data["_meta"]["hostvars"]["rocky_local"]["template_vmid"]
+        self.host["vmid"] = self.data["_meta"]["hostvars"]["rocky"]["template_vmid"]
         with self.assertRaisesRegex(ValidationError, "collide"):
-            validate_inventory(self.data, "fedora_remote")
+            validate_inventory(self.data, "fedora")
 
 
 class TestTemplateValidation(unittest.TestCase):
@@ -213,7 +213,7 @@ class TestTemplateValidation(unittest.TestCase):
                 proxmox_ssh_user="root",
                 proxmox_ssh_port=22,
             )
-        self.host = self.data["_meta"]["hostvars"]["ubuntu_local"]
+        self.host = self.data["_meta"]["hostvars"]["ubuntu"]
 
     def test_guest_inputs_can_wait(self):
         for host in self.data["_meta"]["hostvars"].values():
@@ -230,10 +230,10 @@ class TestTemplateValidation(unittest.TestCase):
             validate_inventory(self.data)
 
     def test_template_identity_collisions(self):
-        other = self.data["_meta"]["hostvars"]["rocky_local"]
+        other = self.data["_meta"]["hostvars"]["rocky"]
         other["template_vmid"] = self.host["template_vmid"]
         with self.assertRaisesRegex(ValidationError, "template_vmid"):
-            validate_inventory(self.data, "fedora_remote", purpose="templates")
+            validate_inventory(self.data, "fedora", purpose="templates")
         other["profile"] = self.host["profile"]
         self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
         for field, value in [("vlan", 33), ("storage", "different"), ("bridge", "vmbr1")]:
@@ -287,11 +287,11 @@ class TestCLI(unittest.TestCase):
         )
 
     def test_example_and_inheritance(self):
-        result = self.run_cli("--targets", "ubuntu_local")
+        result = self.run_cli("--targets", "ubuntu")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "Inventory valid: 1 selected target(s).\n")
         self.assertEqual(result.stderr, "")
-        host = load_inventory(EXAMPLE)["_meta"]["hostvars"]["ubuntu_local"]
+        host = load_inventory(EXAMPLE)["_meta"]["hostvars"]["ubuntu"]
         self.assertEqual(host["memory_mib"], 32768)
 
     def test_bad_sources_are_safe(self):
@@ -330,7 +330,7 @@ class TestCLI(unittest.TestCase):
 
     def test_template_contract_value_is_rejected(self):
         data = load_inventory(EXAMPLE)["_meta"]["hostvars"]
-        data["ubuntu_local"]["api_user_env"] = "{{ lookup('env', 'PROXMOX_API_USER') }}"
+        data["ubuntu"]["api_user_env"] = "{{ lookup('env', 'PROXMOX_API_USER') }}"
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "literal.yml"
             path.write_text(json.dumps({"all": {"children": {"kdive": {"hosts": data}}}}))

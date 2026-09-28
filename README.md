@@ -42,10 +42,10 @@ baselines are recorded in [vars/images.json](vars/images.json):
 
 | Alias | Family | Architecture |
 | --- | --- | --- |
-| `ubuntu_local` | Ubuntu | x86_64 |
-| `fedora_remote` | Fedora | x86_64 |
-| `rocky_local` | Rocky Linux | x86_64 |
-| `opensuse_remote` | openSUSE | x86_64 |
+| `ubuntu` | Ubuntu | x86_64 |
+| `fedora` | Fedora | x86_64 |
+| `rocky` | Rocky Linux | x86_64 |
+| `opensuse` | openSUSE | x86_64 |
 
 Copy it into the ignored private inventory directory and replace its placeholders:
 
@@ -55,7 +55,7 @@ cp inventory/example.yml inventory/private/lab.yml
 chmod 700 inventory/private
 chmod 600 inventory/private/lab.yml
 make validate INVENTORY=inventory/private/lab.yml
-make validate INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local,fedora_remote
+make validate INVENTORY=inventory/private/lab.yml TARGETS=ubuntu,fedora
 ```
 
 Only `inventory/example.yml` is admitted by the inventory ignore rules. Keep real
@@ -66,7 +66,7 @@ Private command output from tools outside this validator also stays private.
 
 Managed hosts belong to `kdive`, directly or through child groups. Ansible group
 variables provide defaults; per-host variables override them. Add several aliases
-with the same profile for separate local/remote lanes or resource variants.
+with the same profile when you need multiple instances or resource variants.
 Other groups may coexist, but these checks only validate managed `kdive` hosts.
 
 | Input | Required value |
@@ -149,7 +149,7 @@ Do not put private keys in `ssh_public_keys`.
 The same validator is available as a controller-only playbook:
 
 ```sh
-INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/validate.yml
 ```
 
@@ -193,9 +193,9 @@ Provided guest IDs must be unique and cannot overlap any template ID.
 set -a
 . ./.env
 set +a
-make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
 # Review the plan, then explicitly import the selected template:
-make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local APPLY=1
+make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu APPLY=1
 ```
 
 `TARGETS` is mandatory and accepts exact comma-separated aliases. The default is a
@@ -208,7 +208,7 @@ these resources through another controller or operator session.
 The same controller operation is exposed through Ansible:
 
 ```sh
-INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/templates.yml
 ```
 
@@ -253,7 +253,7 @@ and external test state. The operator owns host module/reboot and network change
 
 Complete guest inputs, including each unique `fqdn`, before provisioning. The
 short first DNS label becomes the guest hostname; the remainder becomes its DNS
-search domain. For example, `ubuntu-local.example.invalid` identifies a guest
+search domain. For example, `ubuntu.example.invalid` identifies a guest
 independently of its static `ansible_host`. External DNS records remain operator
 owned. Guest validation also checks template inputs and guest/template ID collisions.
 
@@ -286,11 +286,11 @@ before allocation to prevent OpenSSH from reinterpreting the pin location.
 
 ```sh
 # Export API credentials as described above, then inspect the read-only plan:
-make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
 # Create only the selected absent, owned full clone and verify its baseline:
-make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local APPLY=1
+make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu APPLY=1
 # Reusable read-only verification, including after a separately managed restore:
-make verify INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+make verify INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
 ```
 
 Use comma-separated exact aliases for multiple instances. All selected batches
@@ -358,9 +358,9 @@ Issue #5 owns clean snapshots and restoration without blessing a used VM as clea
 The equivalent Ansible entrypoints use the same controller operation:
 
 ```sh
-INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/provision.yml
-INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/verify.yml
 ```
 
