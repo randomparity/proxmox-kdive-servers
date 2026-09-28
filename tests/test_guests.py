@@ -2038,6 +2038,11 @@ class TestBoundedGuestOutput(unittest.TestCase):
             with self.subTest(output=output), self.assertRaisesRegex(ValidationError, message):
                 self.rpc("import os; os.write(1, " + repr(output) + ")")
 
+    def test_deeply_nested_json_is_sanitized(self):
+        source = "import os; os.write(1, b'[' * 32767 + b']' * 32767)"
+        with self.assertRaisesRegex(ValidationError, "^Guest baseline: invalid result$"):
+            self.rpc(source)
+
     def test_duplex_preserves_both_streams_and_large_input(self):
         source = (
             "import sys; sys.stdout.buffer.write(b'o'*32768); sys.stdout.flush();"

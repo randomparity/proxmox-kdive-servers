@@ -241,7 +241,7 @@ def guest_rpc(request, known_hosts, envelope, timeout):
     )
     try:
         return json.loads(result.stdout)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise ValidationError("Guest baseline: invalid result") from None
 
 
