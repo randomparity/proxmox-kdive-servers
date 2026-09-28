@@ -6,6 +6,76 @@ It provides offline inventory checks, verified Proxmox templates, and full-clone
 guests with a verified nested-KVM baseline for four Linux families. Snapshot lifecycle
 and KDIVE installation follow separately.
 
+## Quick start: build all four VMs
+
+This workflow creates Ubuntu, Fedora, Rocky Linux and openSUSE templates, then
+provisions and verifies one guest from each for KDIVE testing. Complete
+[controller setup](#controller-setup) first and check the Proxmox host, storage,
+API permissions and SSH prerequisites in [Verified templates](#verified-templates).
+The host must also have working nested KVM before guest provisioning.
+
+Create a private inventory if you do not already have one:
+
+```sh
+mkdir -p inventory/private
+chmod 700 inventory/private
+cp -n inventory/example.yml inventory/private/lab.yml
+chmod 600 inventory/private/lab.yml
+```
+
+Edit `inventory/private/lab.yml` using the [input reference](#private-inventory).
+Replace the example endpoints, node/storage/bridge/VLAN, guest account/public key,
+FQDNs, static addresses, gateway and DNS servers with your assigned values. Assign
+unused guest and template VM IDs and confirm CPU/RAM/disk sizing. Keep the aliases
+`ubuntu`, `fedora`, `rocky` and `opensuse` for the commands below.
+
+Select all four and validate the inventory offline before contacting Proxmox:
+
+```sh
+export INVENTORY=inventory/private/lab.yml
+export TARGETS=ubuntu,fedora,rocky,opensuse
+unset APPLY RESUME
+make validate
+```
+
+`make validate` checks both guest and template inputs, including types, required
+fields, address consistency and global uniqueness. It does not require credentials
+or prove that the live host has the requested resources.
+
+Export the credentials named by the inventory's three `api_*_env` fields. If you
+keep them in a trusted, ignored `.env` file, load it with `set -a; . ./.env; set +a`.
+Configure trusted API TLS and Proxmox SSH host keys as described below.
+
+Plan template creation, review the result, then apply it:
+
+```sh
+make templates
+# After reviewing the plan:
+make templates APPLY=1
+```
+
+With all templates ready, plan and create the four guests:
+
+```sh
+make provision
+# After reviewing the plan:
+make provision APPLY=1
+make verify
+```
+
+Plans perform live admission checks; apply repeats admission before creation.
+Provisioning verifies each guest's boot, networking, sizing, security enforcement
+and nested-KVM baseline. `make verify` repeats verification without provisioning.
+These commands prepare the VMs; KDIVE installation is a separate step.
+
+**Capacity:** the example requests 32 vCPUs, 128 GiB RAM and 1 TiB of guest root
+disks, plus host headroom, templates and auxiliary disks. A 24-CPU host cannot
+admit all four as a fresh batch. On a smaller host, select one distro at a time
+(for example, `make provision TARGETS=ubuntu`, then the same command with
+`APPLY=1`) and stop idle guests through your normal operator process before
+continuing. See [sizing guidance](#kdive-installation-validation-sizing); running
+commands sequentially does not free resources held by running guests.
+
 ## Controller setup
 
 Use a macOS or Linux controller with Git, Make and
