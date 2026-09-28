@@ -26,9 +26,9 @@ can outlast the bounded reaping attempt and is outside application guarantees.
 
 ## Considered & rejected
 
-- Full capture followed by validation — fact: the existing subprocess invocation
-  with a harmless Python child writing 131073 bytes returns all 131073 before
-  caller validation; it cannot enforce a receive-time bound.
+- Full capture followed by validation — verified: on Linux/Python 3.12,
+  `subprocess.run([sys.executable, "-c", "print(\"x\"*131072)"], capture_output=True)`
+  returns 131073 stdout bytes before caller validation.
 - Reader threads — judgment: concurrent readers need additional ownership and
   shutdown coordination; selectors already serve the supported POSIX controllers.
 - Redirect streams to disk — judgment: shifts unbounded output to storage and adds

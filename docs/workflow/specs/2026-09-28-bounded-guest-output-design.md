@@ -10,6 +10,8 @@ remain excluded. Scope token: q9-6c194b20.
 
 ## Design
 
+Decision: [ADR 0005](../../adr/0005-bounded-guest-output.md).
+
 Use one internal `run_guest(argv, *, input=None, timeout)` operation for both
 call sites. It returns `subprocess.CompletedProcess` with decoded string streams.
 Existing SSH options, identity checks, caller timeouts and protocol validation stay
