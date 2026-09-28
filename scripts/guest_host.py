@@ -246,6 +246,7 @@ def check_configuration(request, config, pending, phase):
         "meta",
         "smbios1",
         "vmgenid",
+        "parent",
     }
     check(set(config) <= allowed, "Unexpected guest configuration or disks; inspect drift")
     for key, value in expected.items():
@@ -268,6 +269,8 @@ def inspect_guest(request, phase="ready", running=True, seed_pending=False):
     path = base_path(request)
     config = native(path + "/config")
     check(isinstance(config, dict), "Invalid native guest configuration")
+    if "parent" in config:
+        check(config["parent"] in snapshot_rows(request), "Guest snapshot ancestry differs")
     checked = config
     if seed_pending:
         check(
@@ -279,7 +282,9 @@ def inspect_guest(request, phase="ready", running=True, seed_pending=False):
     check_configuration(request, checked, native(path + "/pending"), phase)
     status = native(path + "/status/current")
     check(
-        isinstance(status, dict) and status.get("status") == ("running" if running else "stopped"),
+        isinstance(status, dict)
+        and status.get("status")
+        in ({"running", "stopped"} if running is None else {"running" if running else "stopped"}),
         "Guest runtime state differs; inspect exclusive use before retry",
     )
     h = request["host"]
@@ -307,7 +312,7 @@ def inspect_guest(request, phase="ready", running=True, seed_pending=False):
     return config
 
 
-def admission(requests):
+def admission(requests, mode="apply"):
     check(isinstance(requests, list) and 0 < len(requests) <= 100, "Invalid selected batch")
     for request in requests:
         validate_request(request)
@@ -332,6 +337,13 @@ def admission(requests):
         marker_value = "kdive-template-v1:" + template_host.identity(t) + ":ready"
         config = template_host.verify_configuration(t, marker_value, source_storage["extent_bytes"])
         check(config.get("template") == 1, "Selected source is not a ready template")
+    if mode in {"teardown", "plan-teardown"}:
+        resources = native("/cluster/resources", "--type", "vm")
+        existing = [resource_present(r, resources) for r in requests]
+        for r, present in zip(requests, existing, strict=True):
+            if present:
+                inspect_removable(r)
+        return existing
     flags = Path("/proc/cpuinfo").read_text().split()
     module = "kvm_intel" if "vmx" in flags else "kvm_amd" if "svm" in flags else None
     check(
@@ -347,7 +359,11 @@ def admission(requests):
     existing = [resource_present(r, resources) for r in requests]
     for request, present in zip(requests, existing, strict=True):
         if present:
-            inspect_guest(request)
+            config = inspect_guest(request, running=None if mode.endswith("restore") else True)
+            baseline(request, config)
+    if mode.endswith("restore"):
+        check(all(existing), "Restore requires existing owned guests and clean baseline")
+        return existing
     fresh = [r for r, present in zip(requests, existing, strict=True) if not present]
     for r in fresh:
         check(
@@ -533,34 +549,262 @@ def verify_readiness(request, fresh):
     return result
 
 
-def session(requests, mode):
-    check(mode in {"plan", "apply", "verify"}, "Invalid guest operation")
+def normalized_config(config, snapshot=False):
+    check(isinstance(config, dict), "Invalid native baseline configuration")
+    if "vmgenid" in config:
+        guest_verify.machine_uuid(config["vmgenid"])
+    ignored = {"digest", "description", "parent", "vmgenid"}
+    if snapshot:
+        check(
+            not {"vmstate", "snapstate"} & set(config),
+            "Incomplete or RAM snapshot; recreate explicitly",
+        )
+        ignored.add("snaptime")
+    return {key: value for key, value in config.items() if key not in ignored} | {
+        "shares": str(config.get("shares", "1000"))
+    }
+
+
+def snapshot_rows(request):
+    rows = native(base_path(request) + "/snapshot")
+    check(isinstance(rows, list) and rows, "Invalid native snapshot inventory")
+    result = {}
+    for row in rows:
+        check(
+            isinstance(row, dict)
+            and isinstance(row.get("name"), str)
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,39}", row["name"])
+            and row["name"] not in result,
+            "Invalid or duplicate snapshot identity",
+        )
+        result[row["name"]] = row
+    check("current" in result, "Native snapshot inventory lacks current state")
+    del result["current"]
+    return result
+
+
+def baseline(request, config):
+    rows = snapshot_rows(request)
+    check(
+        "clean" in rows, "Clean baseline missing; explicitly teardown and recreate selected guest"
+    )
+    row = rows["clean"]
+    check(
+        type(row.get("snaptime")) is int
+        and row["snaptime"] > 0
+        and row.get("vmstate") == 0
+        and "snapstate" not in row,
+        "Incomplete or RAM clean baseline; inspect and recreate explicitly",
+    )
+    snapshot = native(base_path(request) + "/snapshot/clean/config")
+    check(isinstance(snapshot, dict), "Invalid clean snapshot configuration")
+    try:
+        metadata = json.loads(row.get("description", ""))
+    except (ValueError, TypeError):
+        raise GuestError("Invalid clean baseline metadata; recreate explicitly") from None
+    expected = {
+        "schema": 1,
+        "identity": identity(request),
+        "config_sha256": template_host.digest(normalized_config(config)),
+    }
+    check(
+        isinstance(metadata, dict)
+        and type(metadata.get("schema")) is int
+        and metadata == expected
+        and snapshot.get("description") == row.get("description")
+        and snapshot.get("snaptime") == row["snaptime"]
+        and normalized_config(snapshot, snapshot=True) == normalized_config(config),
+        "Clean baseline identity/configuration differs; recreate explicitly",
+    )
+    return {
+        "snapshot": "clean",
+        "snapshot_identity": template_host.digest(metadata),
+        "snapshot_config_sha256": metadata["config_sha256"],
+        "snapshot_time": row["snaptime"],
+    }
+
+
+def shutdown_guest(request, config, phase="ready"):
+    status = native(base_path(request) + "/status/current")
+    check(
+        isinstance(status, dict) and status.get("status") in {"running", "stopped"},
+        "Invalid guest runtime state before shutdown",
+    )
+    if status["status"] == "running":
+        command(
+            [
+                "qm",
+                "shutdown",
+                str(request["host"]["vmid"]),
+                "--timeout",
+                "180",
+                "--forceStop",
+                "0",
+            ],
+            timeout=210,
+        )
+    stopped = inspect_guest(request, phase=phase, running=False)
+    check(normalized_config(stopped) == normalized_config(config), "Guest changed during shutdown")
+    return stopped
+
+
+def capture_baseline(request, config):
+    check(
+        not snapshot_rows(request), "Fresh guest already has snapshots; inspect without replacement"
+    )
+    stopped = shutdown_guest(request, config)
+    check(not snapshot_rows(request), "Snapshot appeared during shutdown; inspect retained guest")
+    metadata = {
+        "schema": 1,
+        "identity": identity(request),
+        "config_sha256": template_host.digest(normalized_config(stopped)),
+    }
+    command(
+        [
+            "qm",
+            "snapshot",
+            str(request["host"]["vmid"]),
+            "clean",
+            "--vmstate",
+            "0",
+            "--description",
+            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        ],
+        timeout=1800,
+    )
+    baseline(request, inspect_guest(request, running=False))
+    command(["qm", "start", str(request["host"]["vmid"])], timeout=180)
+    config = inspect_guest(request)
+    emit(
+        request,
+        "baseline-boot",
+        guest_uuid=guest_verify.machine_uuid(
+            template_host.properties(config.get("smbios1")).get("uuid")
+        ),
+    )
+    verify_ack(request, read_line(2500), phase="baseline-boot")
+    command(["qm", "agent", str(request["host"]["vmid"]), "ping"], timeout=60)
+    result = inspect_guest(request)
+    check(
+        normalized_config(result) == normalized_config(config), "Guest changed during baseline boot"
+    )
+    baseline(request, result)
+    return result
+
+
+def inspect_removable(request):
+    config = native(base_path(request) + "/config")
+    check(isinstance(config, dict), "Invalid selected guest configuration")
+    phase = next(
+        (p for p in ("ready", "preparing") if config.get("description") == marker(request, p)), None
+    )
+    check(phase is not None, "Selected guest ownership differs; teardown refused")
+    config = inspect_guest(request, phase=phase, running=None)
+    for name in snapshot_rows(request):
+        snapshot = native(base_path(request) + "/snapshot/" + name + "/config")
+        normalized = normalized_config(snapshot, snapshot=True)
+        # Deletion may free disks referenced only by an older snapshot.
+        check(
+            normalized == normalized_config(config),
+            "Snapshot references differ; inspect before teardown",
+        )
+    return config, phase
+
+
+def lifecycle(request, mode):
+    vmid = str(request["host"]["vmid"])
+    if mode == "restore":
+        config = inspect_guest(request, running=None)
+        baseline(request, config)
+        stopped = shutdown_guest(request, config)
+        baseline(request, stopped)
+        command(["qm", "rollback", vmid, "clean", "--start", "0"], timeout=1800)
+        baseline(request, inspect_guest(request, running=False))
+        command(["qm", "start", vmid], timeout=180)
+        config = verify_readiness(request, fresh=False)
+        return config
+    config, phase = inspect_removable(request)
+    volumes = {config[slot].split(",", 1)[0] for slot in ("scsi0", "scsi1", "efidisk0")}
+    shutdown_guest(request, config, phase)
+    inspect_removable(request)
+    command(
+        ["qm", "destroy", vmid, "--purge", "0", "--destroy-unreferenced-disks", "0"], timeout=1800
+    )
+    check(
+        not resource_present(request, native("/cluster/resources", "--type", "vm")),
+        "Guest remains after teardown; inspect completed task",
+    )
+    rows = native(
+        f"/nodes/{request['host']['proxmox_node']}/storage/{request['host']['storage']}/content"
+    )
+    check(
+        isinstance(rows, list)
+        and all(isinstance(r, dict) for r in rows)
+        and not any(
+            r.get("volid") in volumes or r.get("vmid") == request["host"]["vmid"] for r in rows
+        ),
+        "Owned volumes remain after teardown; inspect without broad cleanup",
+    )
+    return None
+
+
+def session(requests, mode, confirmed=False, exclusive=False):
+    check(
+        mode in {"plan", "apply", "verify", "restore", "teardown", "plan-restore", "plan-teardown"},
+        "Invalid guest operation",
+    )
+    check(type(confirmed) is bool and type(exclusive) is bool, "Invalid destructive intent")
+    check(
+        mode not in {"restore", "teardown"} or confirmed and exclusive,
+        "Destructive operation requires exact selected confirmation and exclusive use",
+    )
     check(isinstance(requests, list) and 0 < len(requests) <= 100, "Invalid selected batch")
     for request in requests:
         validate_request(request)
     with contextlib.ExitStack() as locks:
-        if mode == "apply":
+        if not mode.startswith("plan"):
             locks.enter_context(template_host.template_lock(0))
             for vmid in sorted(
                 {r["host"][key] for r in requests for key in ("vmid", "template_vmid")}
             ):
                 locks.enter_context(template_host.template_lock(vmid))
-        existing = admission(requests)
+        existing = admission(requests, mode)
         check(mode != "verify" or all(existing), "Verify requires existing ready guests")
         for request, present in zip(requests, existing, strict=True):
             started = time.monotonic()
-            if mode == "plan":
-                emit(request, "planned", action="preserved" if present else "would-create")
+            if mode.startswith("plan"):
+                action = {
+                    "plan": "preserved" if present else "would-create",
+                    "plan-restore": "would-restore",
+                    "plan-teardown": "would-destroy" if present else "absent",
+                }[mode]
+                emit(request, "planned", action=action)
                 continue
-            if not present:
-                clone(request)
-            config = verify_readiness(request, fresh=not present)
+            if mode == "teardown":
+                if present:
+                    lifecycle(request, mode)
+                emit(
+                    request,
+                    "removed",
+                    action="destroyed" if present else "absent",
+                    duration_seconds=round(time.monotonic() - started, 3),
+                )
+                continue
+            if mode == "restore":
+                config = lifecycle(request, mode)
+            else:
+                if not present:
+                    clone(request)
+                config = verify_readiness(request, fresh=not present)
+                if not present:
+                    config = capture_baseline(request, config)
             emit(
                 request,
                 "ready",
-                action="preserved" if present else "created",
+                action="restored" if mode == "restore" else "preserved" if present else "created",
                 config_sha256=template_host.digest(config),
                 duration_seconds=round(time.monotonic() - started, 3),
+                **baseline(request, config),
             )
 
 
@@ -568,10 +812,13 @@ def main():
     try:
         envelope = read_line(30)
         check(
-            isinstance(envelope, dict) and set(envelope) == {"requests", "mode"},
+            isinstance(envelope, dict)
+            and set(envelope) == {"requests", "mode", "confirmed", "exclusive"},
             "Invalid native guest envelope",
         )
-        session(envelope["requests"], envelope["mode"])
+        session(
+            envelope["requests"], envelope["mode"], envelope["confirmed"], envelope["exclusive"]
+        )
     except (GuestError, guest_verify.GuestError) as error:
         print(json.dumps({"error": str(error)}), flush=True)
         return 1

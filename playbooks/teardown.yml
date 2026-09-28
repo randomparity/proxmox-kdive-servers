@@ -1,0 +1,9 @@
+---
+- name: Run selected guest teardown from the controller
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    proxmox_guest_operation: teardown
+  roles:
+    - role: proxmox_guest
