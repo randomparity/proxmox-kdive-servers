@@ -4,6 +4,8 @@
 
 Accepted by the operator's issue #4 design approval on 2026-09-27.
 
+Hardware-default coupling is superseded by [ADR 0004](0004-independent-guest-configuration.md).
+
 ## Context
 
 The four verified templates need individually selected full clones, actual

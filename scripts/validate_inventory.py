@@ -14,6 +14,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = {"ubuntu", "fedora", "rocky", "opensuse"}
+NIC_MODELS = {
+    "e1000",
+    "e1000-82540em",
+    "e1000-82544gc",
+    "e1000-82545em",
+    "e1000e",
+    "i82551",
+    "i82557b",
+    "i82559er",
+    "ne2k_isa",
+    "ne2k_pci",
+    "pcnet",
+    "rtl8139",
+    "virtio",
+    "vmxnet3",
+}
 CREDENTIAL_REFS = ("api_user_env", "api_token_id_env", "api_token_secret_env")
 PLAINTEXT_CREDENTIALS = {
     "api_user",
@@ -156,7 +172,7 @@ def validate_common(host):
 def validate_template_host(host):
     validate_common(host)
     integer(host.get("template_vmid"), "template_vmid", 100, 999999999)
-    require(host.get("cpu") == "host", "cpu", "set host explicitly")
+    text_field(host.get("cpu"), "cpu", r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
     text_field(
         host.get("proxmox_ssh_host"),
         "proxmox_ssh_host",
@@ -176,10 +192,6 @@ def template_inputs(host):
         "profile",
         "template_vmid",
         "proxmox_node",
-        "storage",
-        "bridge",
-        "cpu",
-        "vlan",
         "proxmox_api_host",
         "proxmox_ssh_host",
         "proxmox_ssh_user",
@@ -214,6 +226,15 @@ def validate_host(host):
         )
     for field in ("cores", "memory_mib", "disk_gib"):
         integer(host.get(field), field)
+    model = host.get("nic_model", "virtio")
+    require(
+        isinstance(model, str) and model in NIC_MODELS, "nic_model", "choose a supported NIC model"
+    )
+    if "nic_queues" in host:
+        integer(host["nic_queues"], "nic_queues", 0, 64)
+        require(model == "virtio", "nic_queues", "queues require the virtio NIC model")
+    if "balloon_mib" in host:
+        integer(host["balloon_mib"], "balloon_mib", 0, host["memory_mib"])
     text_field(host.get("ansible_user"), "ansible_user", r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
     address = ipv4(host.get("ansible_host"), "ansible_host")
     cidr = host.get("ipv4_cidr")
@@ -303,8 +324,6 @@ def validate_inventory(data, targets=None, purpose="guests"):
             names.add(host["fqdn"])
         vmid = host["template_vmid"]
         inputs = template_inputs(host)
-        if purpose == "guests":
-            inputs.pop("vlan")
         require(
             vmid not in templates or templates[vmid] == inputs,
             "template_vmid",

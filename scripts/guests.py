@@ -42,16 +42,9 @@ REBOOT_DISCONNECTED = object()
 
 def request_for(host, revision, source):
     require(isinstance(source, dict), "source template", "missing authenticated configuration")
-    net = guest_host.template_host.properties(source.get("net0"))
-    tag = net.get("tag")
-    require(
-        "tag" not in net or isinstance(tag, str) and re.fullmatch(r"[1-9][0-9]{0,3}", tag),
-        "source template",
-        "invalid native VLAN metadata",
+    template = guest_host.template_host.source_request(
+        templates.request_for(host, False, False), source
     )
-    template = templates.request_for(host, False, False)
-    template["vlan"] = int(tag) if "tag" in net else None
-    guest_host.template_host.validate_request(template)
     require(
         source.get("template") == 1
         and source.get("description")
@@ -68,6 +61,9 @@ def request_for(host, revision, source):
         "storage",
         "bridge",
         "vlan",
+        "nic_model",
+        "nic_queues",
+        "balloon_mib",
         "proxmox_api_host",
         "proxmox_api_port",
         "proxmox_ssh_host",
@@ -174,7 +170,7 @@ def guest_rpc(request, known_hosts, envelope, timeout):
     require(
         (result.returncode == 0 or reboot_disconnect)
         and len(result.stdout) <= 65536
-        and not result.stderr.strip(),
+        and (reboot_disconnect or not result.stderr.strip()),
         "Guest baseline",
         "operation failed; inspect private guest state",
     )
@@ -268,6 +264,7 @@ def verify_guest(request, known_hosts, fresh, guest_uuid, after_boot=None):
             "cpus",
             "memory_bytes",
             "crash_reserved_bytes",
+            "balloon_driver",
             "filesystem_bytes",
             "security",
             "kvm_api",

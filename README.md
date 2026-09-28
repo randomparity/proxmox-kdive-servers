@@ -6,6 +6,76 @@ It provides offline inventory checks, verified Proxmox templates, and full-clone
 guests with a verified nested-KVM baseline for four Linux families. Snapshot lifecycle
 and KDIVE installation follow separately.
 
+## Quick start: build all four VMs
+
+This workflow creates Ubuntu, Fedora, Rocky Linux and openSUSE templates, then
+provisions and verifies one guest from each for KDIVE testing. Complete
+[controller setup](#controller-setup) first and check the Proxmox host, storage,
+API permissions and SSH prerequisites in [Verified templates](#verified-templates).
+The host must also have working nested KVM before guest provisioning.
+
+Create a private inventory if you do not already have one:
+
+```sh
+mkdir -p inventory/private
+chmod 700 inventory/private
+cp -n inventory/example.yml inventory/private/lab.yml
+chmod 600 inventory/private/lab.yml
+```
+
+Edit `inventory/private/lab.yml` using the [input reference](#private-inventory).
+Replace the example endpoints, node/storage/bridge/VLAN, guest account/public key,
+FQDNs, static addresses, gateway and DNS servers with your assigned values. Assign
+unused guest and template VM IDs and confirm CPU/RAM/disk sizing. Keep the aliases
+`ubuntu`, `fedora`, `rocky` and `opensuse` for the commands below.
+
+Select all four and validate the inventory offline before contacting Proxmox:
+
+```sh
+export INVENTORY=inventory/private/lab.yml
+export TARGETS=ubuntu,fedora,rocky,opensuse
+unset APPLY RESUME
+make validate
+```
+
+`make validate` checks both guest and template inputs, including types, required
+fields, address consistency and global uniqueness. It does not require credentials
+or prove that the live host has the requested resources.
+
+Export the credentials named by the inventory's three `api_*_env` fields. If you
+keep them in a trusted, ignored `.env` file, load it with `set -a; . ./.env; set +a`.
+Configure trusted API TLS and Proxmox SSH host keys as described below.
+
+Plan template creation, review the result, then apply it:
+
+```sh
+make templates
+# After reviewing the plan:
+make templates APPLY=1
+```
+
+With all templates ready, plan and create the four guests:
+
+```sh
+make provision
+# After reviewing the plan:
+make provision APPLY=1
+make verify
+```
+
+Plans perform live admission checks; apply repeats admission before creation.
+Provisioning verifies each guest's boot, networking, sizing, security enforcement
+and nested-KVM baseline. `make verify` repeats verification without provisioning.
+These commands prepare the VMs; KDIVE installation is a separate step.
+
+**Capacity:** the example requests 32 vCPUs, 128 GiB RAM and 1 TiB of guest root
+disks, plus host headroom, templates and auxiliary disks. A 24-CPU host cannot
+admit all four as a fresh batch. On a smaller host, select one distro at a time
+(for example, `make provision TARGETS=ubuntu`, then the same command with
+`APPLY=1`) and stop idle guests through your normal operator process before
+continuing. See [sizing guidance](#kdive-installation-validation-sizing); running
+commands sequentially does not free resources held by running guests.
+
 ## Controller setup
 
 Use a macOS or Linux controller with Git, Make and
@@ -42,10 +112,10 @@ baselines are recorded in [vars/images.json](vars/images.json):
 
 | Alias | Family | Architecture |
 | --- | --- | --- |
-| `ubuntu_local` | Ubuntu | x86_64 |
-| `fedora_remote` | Fedora | x86_64 |
-| `rocky_local` | Rocky Linux | x86_64 |
-| `opensuse_remote` | openSUSE | x86_64 |
+| `ubuntu` | Ubuntu | x86_64 |
+| `fedora` | Fedora | x86_64 |
+| `rocky` | Rocky Linux | x86_64 |
+| `opensuse` | openSUSE | x86_64 |
 
 Copy it into the ignored private inventory directory and replace its placeholders:
 
@@ -55,7 +125,7 @@ cp inventory/example.yml inventory/private/lab.yml
 chmod 700 inventory/private
 chmod 600 inventory/private/lab.yml
 make validate INVENTORY=inventory/private/lab.yml
-make validate INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local,fedora_remote
+make validate INVENTORY=inventory/private/lab.yml TARGETS=ubuntu,fedora
 ```
 
 Only `inventory/example.yml` is admitted by the inventory ignore rules. Keep real
@@ -66,7 +136,7 @@ Private command output from tools outside this validator also stays private.
 
 Managed hosts belong to `kdive`, directly or through child groups. Ansible group
 variables provide defaults; per-host variables override them. Add several aliases
-with the same profile for separate local/remote lanes or resource variants.
+with the same profile when you need multiple instances or resource variants.
 Other groups may coexist, but these checks only validate managed `kdive` hosts.
 
 | Input | Required value |
@@ -81,8 +151,10 @@ Other groups may coexist, but these checks only validate managed `kdive` hosts.
 | `gateway`, `dns_servers` | Different usable gateway in the subnet; non-empty IPv4 DNS list |
 | `ansible_user`, `ssh_public_keys` | Guest account and non-empty OpenSSH public-key list (Ed25519/RSA/NIST ECDSA) |
 | `cores`, `memory_mib`, `disk_gib` | Positive integer sizing, at most 2147483647; no Boolean/string coercion |
-| `vlan` | Optional integer 1–4094; desired guest NIC tag for provisioning, template NIC tag for template operations |
-| `template_vmid`, `cpu` | Explicit template ID 100–999999999 and literal `host` CPU |
+| `vlan` | Optional integer 1–4094; guest NIC tag; omit for an untagged guest |
+| `nic_model`, `nic_queues` | NIC model (default `virtio`); optional integer 0–64 queues, only for virtio |
+| `balloon_mib` | Balloon target in MiB, default `memory_mib`; 0 disables, otherwise at most `memory_mib` |
+| `template_vmid`, `cpu` | Explicit template ID 100–999999999 and guest CPU model name; `host` is the default example |
 | `proxmox_ssh_host`, `proxmox_ssh_user`, `proxmox_ssh_port` | Native host SSH endpoint, root-capable login, port default 22 |
 | `proxmox_ssh_private_key_file` | Optional private-key path; blank/omitted uses normal SSH identities |
 | `proxmox_api_ca_file` | Optional CA bundle path; blank/omitted uses system trust |
@@ -149,7 +221,7 @@ Do not put private keys in `ssh_public_keys`.
 The same validator is available as a controller-only playbook:
 
 ```sh
-INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/validate.yml
 ```
 
@@ -178,11 +250,13 @@ extent size. Admission rounds the root and auxiliary reservations to that geomet
 disk readback accepts only bounded, extent-aligned allocations. ZFS retains its native
 allocation checks. An unavailable or malformed extent report fails before allocation.
 
-Assign explicit unused template IDs and CPU `host`. Template validation permits
+Assign explicit unused template IDs. Template CPU/RAM/NIC values are placeholders;
+guest CPU, sizing, networking and storage come from inventory. Template validation permits
 unassigned guest `vmid`, `ansible_host`, `ipv4_cidr`, `gateway` and `dns_servers`;
 operator-assigned static IPv4 addresses and resolver IPs are required before guest
 provisioning. Guest validation remains strict. A shared template ID requires identical
-profile/node/storage/bridge/VLAN/CPU and endpoint inputs throughout the inventory.
+profile/node and endpoint inputs throughout the inventory; guest hardware, destination
+storage and network settings may differ.
 Provided guest IDs must be unique and cannot overlap any template ID.
 
 ```sh
@@ -193,9 +267,9 @@ Provided guest IDs must be unique and cannot overlap any template ID.
 set -a
 . ./.env
 set +a
-make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
 # Review the plan, then explicitly import the selected template:
-make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local APPLY=1
+make templates INVENTORY=inventory/private/lab.yml TARGETS=ubuntu APPLY=1
 ```
 
 `TARGETS` is mandatory and accepts exact comma-separated aliases. The default is a
@@ -208,7 +282,7 @@ these resources through another controller or operator session.
 The same controller operation is exposed through Ansible:
 
 ```sh
-INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/templates.yml
 ```
 
@@ -218,12 +292,15 @@ No API credentials travel over SSH. Failures preserve private input values, repo
 nonzero status and, when observable, the residual ownership phase.
 
 All profiles use OVMF with enrolled secure-boot keys, `host` CPU, two cores, 2048 MiB,
-virtio SCSI, serial console and NoCloud media. VLAN tags come directly from inventory.
+virtio SCSI, serial console and NoCloud media. New templates have untagged placeholder
+NICs. Existing templates retain their original verified bridge, VLAN and storage,
+even when the guest inventory requests different values. Template operations never
+rewrite source defaults or ownership markers to match guest settings.
 Images remain unmodified and unbooted. Their full vendor checksum, exact byte length,
 QCOW2 format, virtual size and absence of backing/encryption/external data are checked
 before import. Matching ready reruns verify description identity, hardware, stopped
 state, exact owned disks and native capabilities without changing Proxmox resources.
-Image, baseline or template configuration changes require a new explicit VMID;
+Source image, baseline or actual template drift requires a new explicit VMID;
 there is no automatic replacement or deletion command.
 
 An interrupted creation is refused on an ordinary rerun. After inspecting private
@@ -253,7 +330,7 @@ and external test state. The operator owns host module/reboot and network change
 
 Complete guest inputs, including each unique `fqdn`, before provisioning. The
 short first DNS label becomes the guest hostname; the remainder becomes its DNS
-search domain. For example, `ubuntu-local.example.invalid` identifies a guest
+search domain. For example, `ubuntu.example.invalid` identifies a guest
 independently of its static `ansible_host`. External DNS records remain operator
 owned. Guest validation also checks template inputs and guest/template ID collisions.
 
@@ -262,9 +339,8 @@ API and revalidates its exact immutable identity and configuration through nativ
 The guest's requested VLAN is bound separately and applied while preserving the cloned
 NIC's MAC address. Tagged and untagged guests can share a source template without
 changing that template. The API token therefore needs selected-template configuration
-audit access as well as node/storage visibility. Template-only operations still use
-their supplied VLAN as an immutable template input; retain the original template inputs
-when operating that lifecycle.
+audit access as well as node/storage visibility. Template operations resolve the same original source settings, so the same guest
+inventory works for both template checks and provisioning.
 
 Keep the private inventory directory mode 0700. Provisioning creates its
 `known_hosts` file mode 0600 for guest SSH pins. Fresh owned clones use OpenSSH
@@ -286,11 +362,11 @@ before allocation to prevent OpenSSH from reinterpreting the pin location.
 
 ```sh
 # Export API credentials as described above, then inspect the read-only plan:
-make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
 # Create only the selected absent, owned full clone and verify its baseline:
-make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local APPLY=1
+make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu APPLY=1
 # Reusable read-only verification, including after a separately managed restore:
-make verify INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local
+make verify INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
 ```
 
 Use comma-separated exact aliases for multiple instances. All selected batches
@@ -304,8 +380,20 @@ never reconfigured or rebooted, and there is no TCG fallback.
 
 Native cooperating locks serialize allocations and selected VM/template operations
 through readiness. Full clones receive exact hardware/static networking, optional
-VLAN, keys, `host` CPU, guest agent, no ballooning, no automatic startup and no
-general cloud-init package upgrade. Root filesystem growth is verified after boot.
+VLAN, NIC model/queues, keys, selected CPU model, guest agent and balloon device,
+with no automatic startup or general cloud-init package upgrade. Root filesystem growth is verified after boot.
+Guest configuration is applied explicitly before boot: template defaults do not
+select the guest CPU model, NIC, destination bridge/storage or cloud-init values.
+The CPU model must expose working nested KVM; there is no emulation fallback.
+
+Ballooning is enabled by default with target equal to configured RAM. Set
+`balloon_mib` lower to allow reclaiming memory, or set it to 0 to disable the device.
+Admission still reserves maximum configured RAM; ballooning does not authorize
+memory overcommit. Verification requires a bound guest `virtio_balloon` driver when
+enabled and checks observed RAM against the configured balloon target and maximum.
+NIC queues use the native default when omitted; explicit `nic_queues` is verified
+exactly and requires `nic_model: virtio`. NIC model names follow Proxmox's supported
+models, including `virtio`, `e1000`, `e1000e` and `vmxnet3`.
 Before first start, provisioning replaces only the clone's generated IDE cloud-init
 seed with a generated `scsi1` seed on its VirtIO SCSI controller. Native removal
 frees the old seed volume; creation regenerates it from inventory. Root and EFI
@@ -343,9 +431,9 @@ cannot authorize preparation merely by accepting the configured SSH credential.
 The UUID and boot identity travel privately and are excluded from public evidence.
 RAM evidence reports usable `memory_bytes` and measured `crash_reserved_bytes`
 separately. Allocation proof requires their sum to be at least 90% of configured
-RAM, without changing the image's crash-kernel settings. Only the native sysfs
-reservation counts, capped at 512 MiB and one quarter of configured RAM; their
-sum cannot exceed configured RAM. Missing crash-reservation support counts as
+RAM (or the positive balloon target), without changing the image's crash-kernel
+settings. Only the native sysfs reservation counts, capped at 512 MiB and one quarter of configured RAM; their
+sum cannot exceed maximum configured RAM. Missing crash-reservation support counts as
 zero; malformed or unreadable evidence fails.
 
 Matching ready reruns perform verification only: they do not restart a stopped
@@ -358,9 +446,9 @@ Issue #5 owns clean snapshots and restoration without blessing a used VM as clea
 The equivalent Ansible entrypoints use the same controller operation:
 
 ```sh
-INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/provision.yml
-INVENTORY=inventory/private/lab.yml TARGETS=ubuntu_local \
+INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/verify.yml
 ```
 

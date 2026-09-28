@@ -4,6 +4,8 @@
 
 Accepted by the operator's design approval for issue #3 on 2026-09-27.
 
+Hardware-default coupling is superseded by [ADR 0004](0004-independent-guest-configuration.md).
+
 ## Context
 
 Four official cloud images need checksummed import, matching-template preservation,

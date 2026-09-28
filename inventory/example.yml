@@ -25,31 +25,31 @@ all:
         memory_mib: 32768
         disk_gib: 256
       hosts:
-        ubuntu_local:
+        ubuntu:
           profile: ubuntu
           template_vmid: 9001
           vmid: 1101
-          fqdn: ubuntu-local.example.invalid
+          fqdn: ubuntu.example.invalid
           ansible_host: 192.0.2.11
           ipv4_cidr: 192.0.2.11/24
-        fedora_remote:
+        fedora:
           profile: fedora
           template_vmid: 9002
           vmid: 1102
-          fqdn: fedora-remote.example.invalid
+          fqdn: fedora.example.invalid
           ansible_host: 192.0.2.12
           ipv4_cidr: 192.0.2.12/24
-        rocky_local:
+        rocky:
           profile: rocky
           template_vmid: 9003
           vmid: 1103
-          fqdn: rocky-local.example.invalid
+          fqdn: rocky.example.invalid
           ansible_host: 192.0.2.13
           ipv4_cidr: 192.0.2.13/24
-        opensuse_remote:
+        opensuse:
           profile: opensuse
           template_vmid: 9004
           vmid: 1104
-          fqdn: opensuse-remote.example.invalid
+          fqdn: opensuse.example.invalid
           ansible_host: 192.0.2.14
           ipv4_cidr: 192.0.2.14/24
