@@ -6,6 +6,7 @@ import math
 import os
 import re
 import select
+import selectors
 import shlex
 import stat
 import subprocess
@@ -148,17 +149,81 @@ def guest_ssh(host, known_hosts, fresh):
     return argv + ["--", host["ansible_host"]]
 
 
+def run_guest(argv, *, input=None, timeout):
+    deadline = time.monotonic() + timeout
+    pending = memoryview(input.encode() if input is not None else b"")
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    received = 0
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    try:
+        with selectors.DefaultSelector() as selector:
+            for name in output:
+                stream = getattr(process, name)
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, name)
+            if process.stdin is not None:
+                if pending:
+                    os.set_blocking(process.stdin.fileno(), False)
+                    selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+                else:
+                    process.stdin.close()
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                for key, _ in selector.select(remaining):
+                    if key.data == "stdin":
+                        try:
+                            sent = os.write(key.fd, pending[:4096])
+                            pending = pending[sent:]
+                        except BrokenPipeError:
+                            pending = pending[:0]
+                        if not pending:
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                        continue
+                    chunk = os.read(key.fd, min(4096, 65537 - received))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    received += len(chunk)
+                    require(
+                        received <= 65536,
+                        "Guest SSH",
+                        "response exceeds limit; inspect private guest state without retry",
+                    )
+                    output[key.data].extend(chunk)
+        code = process.wait(timeout=max(0, deadline - time.monotonic()))
+        try:
+            return subprocess.CompletedProcess(
+                argv, code, output["stdout"].decode("utf-8"), output["stderr"].decode("utf-8")
+            )
+        except UnicodeError:
+            raise ValidationError("Guest SSH: invalid response encoding") from None
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
 def guest_rpc(request, known_hosts, envelope, timeout):
     argv = guest_ssh(request["host"], known_hosts, False)
     source = (ROOT / "scripts/guest_verify.py").read_text()
     try:
-        result = subprocess.run(
+        result = run_guest(
             argv + ["sudo -n python3 -c " + shlex.quote(source)],
             input=json.dumps(dict(envelope, request=request)),
-            capture_output=True,
-            text=True,
             timeout=timeout,
-            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise ValidationError(
@@ -185,12 +250,9 @@ def wait_guest(request, known_hosts, fresh, after_boot):
     deadline = time.monotonic() + (600 if fresh or after_boot else 30)
     while True:
         try:
-            probe = subprocess.run(
+            probe = run_guest(
                 argv + ["cat /proc/sys/kernel/random/boot_id" if after_boot else "true"],
-                capture_output=True,
-                text=True,
                 timeout=15,
-                check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
             raise ValidationError(

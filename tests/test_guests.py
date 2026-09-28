@@ -858,8 +858,8 @@ class TestGuestBoot(unittest.TestCase):
                 self.subTest(value=value),
                 patch.object(guests, "guest_ssh", return_value=["ssh"]),
                 patch.object(
-                    guests.subprocess,
-                    "run",
+                    guests,
+                    "run_guest",
                     return_value=subprocess.CompletedProcess([], 0, value, ""),
                 ) as run,
                 patch.object(guests.time, "monotonic", side_effect=[0, 601]),
@@ -1776,7 +1776,7 @@ class TestRebootExchange(unittest.TestCase):
             pins = Path(directory) / "known_hosts"
             with (
                 patch.object(guests, "host_ssh", return_value=[sys.executable, "-u", "-c", code]),
-                patch.object(guests.subprocess, "run", side_effect=ssh),
+                patch.object(guests, "run_guest", side_effect=ssh),
                 patch.object(guests, "wait_guest", side_effect=bounded_wait),
             ):
                 if fault and fault not in {"disconnect", "ack-disconnect"}:
@@ -1819,8 +1819,8 @@ class TestRebootExchange(unittest.TestCase):
         req = request()
         for output in ("", json.dumps({"reboot_requested": True})):
             with patch.object(
-                guests.subprocess,
-                "run",
+                guests,
+                "run_guest",
                 return_value=subprocess.CompletedProcess([], 255, output, ""),
             ):
                 for envelope in ({"fresh": True}, {"fresh": False}):
@@ -1829,3 +1829,132 @@ class TestRebootExchange(unittest.TestCase):
                         self.assertRaises(ValidationError),
                     ):
                         guests.guest_rpc(req, Path("/unused"), envelope, 1)
+
+
+class TestBoundedGuestOutput(unittest.TestCase):
+    def run_child(self, source, operation, *, timeout=2):
+        import sys
+        import time
+
+        children = []
+        popen = subprocess.Popen
+
+        def start(*args, **kwargs):
+            child = popen(*args, **kwargs)
+            children.append(child)
+            return child
+
+        argv = [sys.executable, "-u", "-c", source]
+        started = time.monotonic()
+        try:
+            with (
+                patch.object(guests, "guest_ssh", return_value=argv),
+                patch.object(guests.subprocess, "Popen", side_effect=start),
+            ):
+                return operation(argv, timeout)
+        finally:
+            for child in children:
+                try:
+                    self.assertIsNotNone(child.returncode, "transport was not reaped")
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=5)
+                    for stream in (child.stdin, child.stdout, child.stderr):
+                        if stream is not None:
+                            stream.close()
+            self.assertLess(time.monotonic() - started, timeout + 6)
+
+    def rpc(self, source, envelope=None):
+        return self.run_child(
+            source,
+            lambda argv, timeout: guests.guest_rpc(
+                request(), Path("/unused"), envelope or {"fresh": False}, timeout
+            ),
+        )
+
+    def test_each_stream_and_combined_overflow_reap_before_timeout(self):
+        for source in (
+            "os.write(1, b'x' * 65537)",
+            "os.write(2, b'x' * 65537)",
+            "os.write(1, b'x' * 32768); os.write(2, b'x' * 32769)",
+        ):
+            with (
+                self.subTest(source=source),
+                self.assertRaisesRegex(ValidationError, "^Guest SSH: response exceeds limit;"),
+            ):
+                self.rpc("import os,time; " + source + "; time.sleep(30)")
+
+    def test_exact_boundary_valid_json_and_multibyte_output(self):
+        for value in ("x" * 65534, "é" * 32767):
+            with self.subTest(multibyte=value[0] != "x"):
+                source = (
+                    "import os,json; os.write(1,json.dumps("
+                    + repr(value[0])
+                    + "*"
+                    + str(len(value))
+                    + ",ensure_ascii=False).encode())"
+                )
+                self.assertEqual(self.rpc(source), value)
+
+    def test_partial_json_and_invalid_encoding_are_sanitized(self):
+        for output, message in (
+            (b'{"private":', "Guest baseline: invalid result"),
+            (b"\xffprivate", "Guest SSH: invalid response encoding"),
+        ):
+            with self.subTest(output=output), self.assertRaisesRegex(ValidationError, message):
+                self.rpc("import os; os.write(1, " + repr(output) + ")")
+
+    def test_duplex_preserves_both_streams_and_large_input(self):
+        source = (
+            "import sys; sys.stdout.buffer.write(b'o'*32768); sys.stdout.flush();"
+            "sys.stderr.buffer.write(b'e'*32768); sys.stderr.flush();"
+            "assert len(sys.stdin.buffer.read()) == 262144"
+        )
+        result = self.run_child(
+            source,
+            lambda argv, timeout: guests.run_guest(argv, input="i" * 262144, timeout=timeout),
+        )
+        self.assertEqual(
+            (result.returncode, len(result.stdout), len(result.stderr)), (0, 32768, 32768)
+        )
+
+    def test_overflow_while_input_is_blocked(self):
+        with self.assertRaisesRegex(ValidationError, "response exceeds limit"):
+            self.run_child(
+                "import os,time; os.write(2,b'x'*65537); time.sleep(30)",
+                lambda argv, timeout: guests.run_guest(argv, input="i" * 262144, timeout=timeout),
+            )
+
+    def test_broken_stdin_still_reads_response(self):
+        result = self.run_child(
+            "import os; os.close(0); os.write(1,b'{}')",
+            lambda argv, timeout: guests.run_guest(argv, input="i" * 262144, timeout=timeout),
+        )
+        self.assertEqual((result.returncode, result.stdout), (0, "{}"))
+
+    def test_timeout_reaps_blocked_child_including_after_output_eof(self):
+        for source in (
+            "import time; time.sleep(30)",
+            "import os,time; os.close(1); os.close(2); time.sleep(30)",
+        ):
+            with self.subTest(source=source), self.assertRaises(subprocess.TimeoutExpired):
+                self.run_child(
+                    source,
+                    lambda argv, timeout: guests.run_guest(argv, timeout=timeout),
+                    timeout=0.2,
+                )
+
+    def test_overflow_cannot_be_reboot_disconnect(self):
+        with self.assertRaisesRegex(ValidationError, "response exceeds limit"):
+            self.rpc(
+                "import os; os.write(2,b'x'*65537); raise SystemExit(255)",
+                {"reboot_from": "12345678-1234-1234-1234-123456789abd"},
+            )
+
+    def test_readiness_overflow_fails_before_ready(self):
+        with self.assertRaisesRegex(ValidationError, "response exceeds limit"):
+            self.run_child(
+                "import os; os.write(1,b'x'*65537)",
+                lambda argv, timeout: guests.wait_guest(request(), Path("/unused"), False, None),
+            )
