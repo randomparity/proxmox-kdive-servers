@@ -581,7 +581,7 @@ TOOLCHAIN_PACKAGES = {
     "docker-buildx-plugin docker-compose-plugin",
     "opensuse": "gcc make pkgconf-pkg-config libvirt-devel python3-devel libelf-devel "
     "ShellCheck shfmt libvirt-daemon-qemu libvirt-daemon-proxy libvirt-client qemu-x86 "
-    "docker docker-compose",
+    "docker docker-compose polkit",
 }
 UV_VERSION = "0.12.19"
 JUST_VERSION = "1.58.0"

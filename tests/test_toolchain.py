@@ -273,6 +273,21 @@ class ToolchainTests(unittest.TestCase):
         with patch.object(g, "command", side_effect=run):
             g.toolchain_check_packages("opensuse")
 
+    def test_opensuse_installs_polkit_for_libvirt_group_authorization(self):
+        def run(argv, timeout=60):
+            if argv[0] == "zypper":
+                self.assertIn("polkit", argv)
+                raise RuntimeError("packages prepared")
+            return ""
+
+        with (
+            patch.object(g, "command", side_effect=run),
+            patch.object(g.pwd, "getpwnam"),
+            patch.object(g, "toolchain_source_path"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "packages prepared"):
+                g.prepare_toolchain({"host": {"profile": "opensuse", "ansible_user": "operator"}})
+
     def test_docker_key_fingerprint_exact(self):
         valid = "fpr:::::::::060A61C51B558A7F742B77AAC52FEB6B621E9F35:\n"
         g.check_docker_key(valid)
