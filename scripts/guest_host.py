@@ -682,7 +682,7 @@ def baseline(request, config, level="clean"):
     metadata = level_metadata_chain(request, config, level)[-1]
     row = snapshot_rows(request)[level]
     check(
-        guest_verify.level_json(row["description"]) == metadata,
+        guest_verify.level_equal(guest_verify.level_json(row["description"]), metadata),
         "Level metadata changed during admission",
     )
     return {
@@ -771,7 +771,7 @@ def level_exchange(request, config, level, prepare=False):
     )
     if not prepare:
         check(
-            level_metadata_chain(request, current, level) == chain,
+            guest_verify.level_equal(level_metadata_chain(request, current, level), chain),
             "Level chain changed during guest checks",
         )
         return None
@@ -779,7 +779,7 @@ def level_exchange(request, config, level, prepare=False):
     stopped = shutdown_guest(request, current)
     prepare_admission(request, stopped, level)
     check(
-        level_metadata_chain(request, stopped, parent) == chain,
+        guest_verify.level_equal(level_metadata_chain(request, stopped, parent), chain),
         "Parent metadata changed during preparation",
     )
     return metadata

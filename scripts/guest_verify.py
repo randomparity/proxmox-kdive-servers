@@ -616,6 +616,13 @@ def level_json(value):
         raise GuestError("Invalid level metadata; inspect manifest") from None
 
 
+def level_equal(left, right):
+    # Python equality conflates JSON booleans, integers and floats.
+    return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(
+        right, sort_keys=True, allow_nan=False
+    )
+
+
 def level_metadata(metadata, name, parent, identity, config_sha256):
     item = level_chain(name)[-1]
     check(
@@ -667,7 +674,7 @@ def level_manifest(name, metadata, write=False):
                     "Unsafe level manifest file",
                 )
                 check(
-                    level_json(stream.read(65537)) == metadata,
+                    level_equal(level_json(stream.read(65537)), metadata),
                     "Guest and snapshot level metadata differ; restore selected level",
                 )
             return

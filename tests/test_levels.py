@@ -78,6 +78,21 @@ class TestLevelManifest(unittest.TestCase):
         with self.assertRaises(ValueError):
             guest_verify.level_manifest("tools", {"schema": 2}, write=True)
 
+    def test_manifest_json_types_must_match_snapshot(self):
+        value = {"schema": 1, "content": {"version": 1}}
+        guest_verify.level_manifest("tools", value, write=True)
+        file = self.root / "tools.json"
+        for changed in (
+            dict(value, schema=True),
+            dict(value, schema=1.0),
+            dict(value, content={"version": True}),
+        ):
+            file.write_text(json.dumps(changed))
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                guest_verify.level_manifest("tools", value)
+        file.write_text(json.dumps(value, indent=2))
+        guest_verify.level_manifest("tools", value)
+
     def test_hook_prepare_manifest_verify_and_failed_check(self):
         parent = {"schema": 1, "identity": "a" * 64, "config_sha256": "b" * 64}
         proposed = dict(

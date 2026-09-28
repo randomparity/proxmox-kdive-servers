@@ -532,7 +532,7 @@ def complete_level(process, request, event, mode, known_hosts, level, guest_uuid
     if mode == "level":
         validate_event(request, result, "snapshot-ready", level)
         require(
-            result["metadata"] == response["metadata"],
+            guest_verify.level_equal(result["metadata"], response["metadata"]),
             "Native level",
             "READY metadata differs from verified guest",
         )
