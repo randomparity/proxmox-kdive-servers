@@ -115,7 +115,7 @@ def validate_request(request):
 
 def check_capacity(requests, node, memory, storages, source_extents=None):
     if not requests:
-        return
+        return []
     cpu = node.get("cpu")
     cpus = node.get("cpuinfo", {}).get("cpus")
     loads = node.get("loadavg")
@@ -134,16 +134,18 @@ def check_capacity(requests, node, memory, storages, source_extents=None):
     except (ValueError, TypeError):
         raise GuestError("Invalid CPU load metric; inspect native node status") from None
     check(math.isfinite(load) and load >= 0, "Invalid CPU load metric")
-    check(
-        sum(r["host"]["cores"] for r in requests) + math.ceil(max(cpu * cpus, load)) <= cpus,
-        "Insufficient observed CPU capacity; release workload capacity before retry",
-    )
+    warnings = []
+    cores = sum(r["host"]["cores"] for r in requests)
+    free = cpus - math.ceil(max(cpu * cpus, load))
+    if cores > free:
+        warnings.append({"resource": "cpu", "requested": cores, "available": max(free, 0)})
     match = re.search(r"^MemAvailable:\s+([0-9]+) kB$", memory, re.MULTILINE)
     check(match is not None, "Missing MemAvailable; inspect native memory metrics")
-    check(
-        sum(r["host"]["memory_mib"] for r in requests) * 1024 <= int(match[1]),
-        "Insufficient available RAM; release memory before retry",
-    )
+    memory_mib = sum(r["host"]["memory_mib"] for r in requests)
+    if memory_mib * 1024 > int(match[1]):
+        warnings.append(
+            {"resource": "memory", "requested": memory_mib, "available": int(match[1]) // 1024}
+        )
     for storage, status in storages.items():
         extent = status["extent_bytes"]
         demand = sum(
@@ -162,6 +164,7 @@ def check_capacity(requests, node, memory, storages, source_extents=None):
             type(status.get("avail")) is int and status["avail"] >= demand,
             "Insufficient reported storage space; release storage before retry",
         )
+    return warnings
 
 
 def resource_present(request, resources):
@@ -562,13 +565,15 @@ def admission(requests, mode="apply", level="clean"):
             ),
             "Guest root disk cannot shrink the source allocation; increase disk_gib",
         )
-    check_capacity(
+    check(mode != "verify" or all(existing), "Verify requires existing ready guests")
+    for warning in check_capacity(
         fresh,
         native(f"/nodes/{hosts[0]['proxmox_node']}/status"),
         Path("/proc/meminfo").read_text(),
         storages,
         source_extents,
-    )
+    ):
+        print(json.dumps({"phase": "capacity-warning"} | warning), flush=True)
     return existing
 
 
@@ -1141,7 +1146,6 @@ def session(requests, mode, confirmed=False, exclusive=False, level="clean"):
             ):
                 locks.enter_context(template_host.template_lock(vmid))
         existing = admission(requests, mode, level)
-        check(mode != "verify" or all(existing), "Verify requires existing ready guests")
         for request, present in zip(requests, existing, strict=True):
             started = time.monotonic()
             if mode.startswith("plan"):

@@ -47,25 +47,55 @@ class TestGuestHost(unittest.TestCase):
         node = {"cpuinfo": {"cpus": 4}, "cpu": 0.1, "loadavg": ["1.1", "0", "0"]}
         memory = "MemAvailable: 8388608 kB\n"
         storage = {"avail": 100 * 1024**3, "extent_bytes": 0}
-        guest_host.check_capacity([self.request], node, memory, {"pool": storage})
-        guest_host.check_capacity([], {}, "", {})
+        pools = {"pool": storage}
+        self.assertEqual(guest_host.check_capacity([self.request], node, memory, pools), [])
+        self.assertEqual(guest_host.check_capacity([], {}, "", {}), [])
         for changed in [
             dict(node, cpu=None),
             dict(node, cpu=1.1),
             dict(node, loadavg=[]),
             dict(node, loadavg=["nan"]),
-            dict(node, loadavg=["3"]),
         ]:
             with self.subTest(node=changed), self.assertRaises(guest_host.GuestError):
-                guest_host.check_capacity([self.request], changed, memory, {"pool": storage})
+                guest_host.check_capacity([self.request], changed, memory, pools)
+        cpu = {"resource": "cpu", "requested": 4, "available": 2}
+        for requests, changed, mem, expected in [
+            (
+                [self.request],
+                dict(node, loadavg=["3"]),
+                memory,
+                [dict(cpu, requested=2, available=1)],
+            ),
+            (
+                [self.request],
+                dict(node, loadavg=["5"]),
+                memory,
+                [dict(cpu, requested=2, available=0)],
+            ),
+            ([self.request, self.request], node, memory, [cpu]),
+            (
+                [self.request],
+                node,
+                "MemAvailable: 1 kB\n",
+                [{"resource": "memory", "requested": 4096, "available": 0}],
+            ),
+            (
+                [self.request, self.request],
+                node,
+                "MemAvailable: 8388607 kB\n",
+                [cpu, {"resource": "memory", "requested": 8192, "available": 8191}],
+            ),
+        ]:
+            with self.subTest(node=changed, memory=mem, count=len(requests)):
+                self.assertEqual(guest_host.check_capacity(requests, changed, mem, pools), expected)
         with self.assertRaises(guest_host.GuestError):
-            guest_host.check_capacity([self.request, self.request], node, memory, {"pool": storage})
-        for mem in ["MemAvailable: 1 kB\n", "MemFree: 8388608 kB\n"]:
-            with self.assertRaises(guest_host.GuestError):
-                guest_host.check_capacity([self.request], node, mem, {"pool": storage})
+            guest_host.check_capacity([self.request], node, "MemFree: 8388608 kB\n", pools)
         with self.assertRaises(guest_host.GuestError):
             guest_host.check_capacity(
-                [self.request], node, memory, {"pool": dict(storage, avail=32 * 1024**3)}
+                [self.request, self.request],
+                node,
+                "MemAvailable: 1 kB\n",
+                {"pool": dict(storage, avail=32 * 1024**3)},
             )
 
     def test_baseline_identity_binds_config_but_not_controller_revision(self):
@@ -1516,6 +1546,36 @@ class TestNativeLifecycle(unittest.TestCase):
                 with self.assertRaisesRegex(guest_host.GuestError, "storage space"):
                     self.execute("apply")
                 self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
+
+    def oversubscribed_node(self):
+        original_read = self.fixture.read
+
+        def read(argv):
+            if argv[2] == f"/nodes/{self.fixture.template.node}/status":
+                return json.dumps({"cpuinfo": {"cpus": 2}, "cpu": 0, "loadavg": ["1"]})
+            return original_read(argv)
+
+        return patch.object(self.fixture, "read", side_effect=read)
+
+    def test_oversubscribed_batch_warns_and_proceeds(self):
+        warning = {"phase": "capacity-warning", "resource": "cpu", "requested": 2, "available": 1}
+        with self.oversubscribed_node():
+            events = self.execute("plan")
+            self.assertEqual(events[0], warning)
+            self.assertEqual(events[1]["action"], "would-create")
+            events = self.execute("apply")
+        self.assertEqual(events[0], warning)
+        self.assertEqual(events[-1]["action"], "created")
+
+    def test_verify_of_absent_guest_fails_without_capacity_warning(self):
+        output = io.StringIO()
+        with (
+            self.oversubscribed_node(),
+            contextlib.redirect_stdout(output),
+            self.assertRaisesRegex(guest_host.GuestError, "Verify requires existing"),
+        ):
+            guest_host.session([self.req], "verify")
+        self.assertEqual(output.getvalue(), "")
 
     def test_legacy_disabled_guest_without_explicit_shares_verifies(self):
         self.req["host"]["balloon_mib"] = 0
