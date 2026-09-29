@@ -10,3 +10,8 @@
     proxmox_guest_result.stdout_lines | map('from_json') |
     selectattr('action', 'in', ['created', 'restored', 'destroyed']) | list | length > 0
   no_log: true
+
+- name: Show guest capacity warnings
+  ansible.builtin.debug:
+    msg: "{{ item }}"
+  loop: "{{ proxmox_guest_result.stderr_lines | select('match', '^Guest capacity warning: ') | list }}"
