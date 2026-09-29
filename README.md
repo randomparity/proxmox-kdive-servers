@@ -70,12 +70,12 @@ and nested-KVM baseline, captures a no-RAM `clean` snapshot, then boots and veri
 These commands prepare the VMs; KDIVE installation is a separate step.
 
 **Capacity:** the example requests 32 vCPUs, 128 GiB RAM and 1 TiB of guest root
-disks, plus host headroom, templates and auxiliary disks. A 24-CPU host cannot
-admit all four as a fresh batch. On a smaller host, select one distro at a time
-(for example, `make provision TARGETS=ubuntu`, then the same command with
-`APPLY=1`) and stop idle guests through your normal operator process before
-continuing. See [sizing guidance](#kdive-installation-validation-sizing); running
-commands sequentially does not free resources held by running guests.
+disks, plus host headroom, templates and auxiliary disks. When new guests' vCPUs or
+RAM exceed the host's observed free capacity, the plan and the apply print a
+`Guest capacity warning` on stderr naming the node, the request and the observed
+capacity, then proceed: these lab guests are not expected to be fully loaded at the
+same time. Storage must still fit. See
+[sizing guidance](#kdive-installation-validation-sizing).
 
 ## Controller setup
 
@@ -188,12 +188,12 @@ capacity is free space on the relevant filesystem, not the nominal virtual disk 
 [KDIVE installation contract](https://github.com/randomparity/kdive/blob/main/docs/operating/install.md).
 
 Four such VMs total 32 configured vCPUs, 128 GiB RAM and 1 TiB of root disks,
-plus templates, auxiliary disks and snapshot growth. A 24-CPU host cannot admit
-all four as one fresh batch; run exact targets sequentially, stop an idle lane
-through the operator's lifecycle process, and leave capacity for Proxmox and
-other workloads. Even two lanes need 64 GiB available RAM plus host headroom.
-The existing live admission checks remain authoritative; thin provisioning is
-not a substitute for free capacity. A 4 TB pool is not all available to this lab.
+plus templates, auxiliary disks and snapshot growth. On a 24-CPU host a fresh batch
+of all four oversubscribes CPU and is admitted with a capacity warning; running all
+four lanes under load at once contends for CPU and RAM, so stop idle lanes through
+the operator's lifecycle process and leave capacity for Proxmox and other workloads.
+Storage admission remains authoritative; thin provisioning is not a substitute for
+free capacity. A 4 TB pool is not all available to this lab.
 
 Run the #2807 installation proofs on the dedicated
 [clean-only installation guests](#clean-only-installation-guests), not on the `kdive` level,
@@ -401,12 +401,16 @@ make verify INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
 
 Use comma-separated exact aliases for multiple instances. All selected batches
 are planned before an apply; admission repeats under the native allocation lock.
-New cores plus rounded-up maximum of observed busy CPUs and one-minute load must
-fit host logical CPUs. New RAM must fit `MemAvailable`; full root/auxiliary disks
-must fit reported storage. These are observed admission checks, not dedicated-core
-reservations: the operator controls concurrent workloads. Missing capacity,
-nesting, source ownership or native evidence fails before allocation. The host is
-never reconfigured or rebooted, and there is no TCG fallback.
+Full root/auxiliary disks must fit reported storage. When new cores exceed host
+logical CPUs minus the rounded-up maximum of observed busy CPUs and one-minute load,
+or new RAM exceeds `MemAvailable`, admission prints a capacity warning per native
+host to stderr and proceeds. Apply prints it for the pre-apply plan and again for
+the locked recheck. These are observations, not dedicated-core reservations: the
+operator controls concurrent workloads. The Ansible entrypoints hide controller
+output under `no_log`, so run the `make` plan to see warnings. Missing storage
+capacity, missing or invalid CPU/memory metrics, nesting, source ownership or native
+evidence fails before allocation. The host is never reconfigured or rebooted, and
+there is no TCG fallback.
 
 Native cooperating locks serialize allocations and selected VM/template operations
 through readiness. Full clones receive exact hardware/static networking, optional
