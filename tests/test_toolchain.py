@@ -424,6 +424,13 @@ class RockySourceTests(unittest.TestCase):
     def test_rocky_shfmt_rejects_hash_modes_links_and_missing_file(self):
         with self.binary_file() as path:
             g.check_rocky_shfmt(path)
+            with patch.object(
+                Path,
+                "lstat",
+                return_value=SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=1000),
+            ):
+                with self.assertRaises(g.GuestError):
+                    g.check_rocky_shfmt(path)
             path.write_bytes(b"unapproved")
             with self.assertRaises(g.GuestError):
                 g.check_rocky_shfmt(path)
@@ -464,6 +471,9 @@ class RockySourceTests(unittest.TestCase):
                 g.prepare_rocky_shfmt()
             self.assertEqual(path.read_bytes(), b"operator content")
             run.assert_not_called()
+            path.write_bytes(b"approved binary")
+            g.prepare_rocky_shfmt()
+            run.assert_not_called()
 
     def test_rocky_shfmt_download_digest_and_exclusive_install(self):
         for content in (b"approved binary", b"corrupt download"):
@@ -489,6 +499,14 @@ class RockySourceTests(unittest.TestCase):
                             g.prepare_rocky_shfmt()
                         self.assertFalse(path.exists())
                 self.assertEqual(list(path.parent.glob(".kdive-shfmt-*")), [])
+
+    def test_rocky_packages_include_running_kernel_modules_and_reject_bad_release(self):
+        with patch.object(g.platform, "release", return_value="6.12.0-test.x86_64"):
+            self.assertIn("kernel-modules-extra-6.12.0-test.x86_64", g.toolchain_packages("rocky"))
+        for value in ("", "--option", "6.12.0;bad", "6.12.0\nextra", "a" * 200):
+            with patch.object(g.platform, "release", return_value=value):
+                with self.assertRaisesRegex(g.GuestError, "kernel release"):
+                    g.toolchain_packages("rocky")
 
     def test_rocky_preparation_replaces_only_rpm_requirement(self):
         self.assertNotIn("shfmt", g.toolchain_packages("rocky"))

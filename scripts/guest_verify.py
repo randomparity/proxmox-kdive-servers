@@ -648,9 +648,17 @@ TOOLCHAIN_DIAGNOSTICS = (
 
 
 def toolchain_packages(profile):
-    return "bash coreutils findutils grep git curl ca-certificates".split() + (
+    packages = "bash coreutils findutils grep git curl ca-certificates".split() + (
         TOOLCHAIN_PACKAGES[profile].split()
     )
+    if profile == "rocky":
+        release = platform.release()
+        check(
+            bool(re.fullmatch(r"[0-9][A-Za-z0-9._+-]{0,127}", release)),
+            "Invalid Rocky kernel release; inspect running kernel",
+        )
+        packages.append(f"kernel-modules-extra-{release}")
+    return packages
 
 
 def toolchain_command(argv, operation, timeout=60):
