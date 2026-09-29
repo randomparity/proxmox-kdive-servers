@@ -28,6 +28,10 @@ input. The product writes one immutable seed per guest, matched by MAC without r
 named by its content hash and carrying the guest identity, verifies it before use and
 deletes it only after the guest is gone and no configuration references it.
 
+Ubuntu 26.04 installs uutils coreutils by default. By operator decision on 2026-09-29, the
+toolchain check accepts `realpath` from GNU or uutils coreutils and rejects any other
+provider; `find` and `grep` must still be GNU.
+
 ## Considered & rejected
 
 - Keep the old image: verified: vars/images.json at ed3a224 records Ubuntu 24.04 and
@@ -45,6 +49,10 @@ deletes it only after the guest is gone and no configuration references it.
   failing and bakes an untested second boot into the clean baseline.
 - Modify the pinned image or template cloud.cfg: judgment: breaks the immutable upstream
   image pin and template identity for a per-guest network choice.
+- Switch Ubuntu to GNU coreutils: judgment: the operator declined removing the protected
+  uutils provider (`coreutils-from-gnu` requires removing an essential package).
+- GNU-named coreutils first on the operator PATH: judgment: extra shim machinery; the
+  operator declined it.
 - Custom user-data as well as network: judgment: replaces the native user and key seeding
   the product already verifies, for no gain.
 

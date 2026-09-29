@@ -625,7 +625,9 @@ operator to `docker`, `kvm` and `libvirt`, and makes operator-owned `~/src` and 
 from group/other writes. It refuses symlinks, foreign ownership and unsafe system ancestors.
 Docker membership grants broad guest privileges. Security enforcement stays enabled.
 Operator login checks exercise GNU tools, Bash >=4.4, native build tools, headers, QEMU,
-Docker/Compose and system libvirt, including operator Docker access.
+Docker/Compose and system libvirt, including operator Docker access. `realpath` may also be
+uutils coreutils, which Ubuntu 26.04 installs by default; `find` and `grep` must be GNU, and
+any other `realpath` provider fails preparation and verification.
 
 The operator gets pinned `uv 0.12.19` from Astral and `rust-just 1.58.0` from PyPI with
 `~/.local/bin` on the login PATH. The manifest records distro/release, critical tool versions,

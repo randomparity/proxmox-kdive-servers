@@ -192,6 +192,61 @@ class ToolchainTests(unittest.TestCase):
                 with self.subTest(tool=missing), self.assertRaises(g.GuestError):
                     g.toolchain_observation(request)
 
+    def test_realpath_accepts_gnu_or_uutils_coreutils_only(self):
+        request = {
+            "host": {"profile": "ubuntu", "ansible_user": "operator"},
+            "template": {"image": {"release": "26.04"}},
+        }
+        outputs = {
+            "bash": "5.3",
+            "id": "docker kvm libvirt",
+            "uv": "uv 0.12.19",
+            "just": "just 1.58.0",
+            "virsh": "12.0.0",
+            "docker": "29.1.3",
+        }
+
+        def run(argv, timeout=60):
+            if argv[0] == "runuser":
+                import shlex
+
+                return outputs.get(shlex.split(argv[-1])[0], "GNU available")
+            if argv[0] == "dpkg-query":
+                if "-f=${db:Status-Status}\n" == argv[2]:
+                    return "installed\n" * len(g.toolchain_packages("ubuntu"))
+                return "sample\t1\tinstalled\n"
+            return "enabled"
+
+        with (
+            patch.object(g, "command", side_effect=run),
+            patch.object(g, "toolchain_source_path"),
+            patch.object(g.pwd, "getpwnam"),
+            patch.object(g.shutil, "which", return_value="qemu-system-x86_64"),
+        ):
+            for identity in (
+                "realpath (GNU coreutils) 9.5\nCopyright",
+                "realpath (uutils coreutils) 0.8.0\n",
+            ):
+                outputs["realpath"] = identity
+                with self.subTest(identity=identity):
+                    self.assertEqual(g.toolchain_observation(request)["release"], "26.04")
+            for identity in (
+                "realpath (busybox) 1.37\n",
+                "realpath (uutils findutils) 0.8.0\n",
+                "coreutils realpath (uutils coreutils) 0.8.0\n",
+                "",
+            ):
+                outputs["realpath"] = identity
+                with (
+                    self.subTest(identity=identity),
+                    self.assertRaisesRegex(g.GuestError, "realpath must be GNU or uutils"),
+                ):
+                    g.toolchain_observation(request)
+            outputs["realpath"] = "realpath (uutils coreutils) 0.8.0"
+            outputs["find"] = "find (uutils findutils) 0.8.0"
+            with self.assertRaisesRegex(g.GuestError, "find must be GNU"):
+                g.toolchain_observation(request)
+
     def test_monolithic_libvirt_absence_is_not_a_command_failure(self):
         commands = []
 

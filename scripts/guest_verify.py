@@ -980,7 +980,13 @@ def toolchain_observation(request):
     toolchain_login_check(bash, operator_command(user, ["id", "-Gn"]))
     for tool in ("git", "curl", "gcc", "make", "pkg-config", "python3", "shellcheck", "shfmt"):
         operator_command(user, [tool, "--version"])
-    for tool in ("realpath", "find", "grep"):
+    # Ubuntu 26.04 ships uutils coreutils by default; the operator accepted it for realpath.
+    realpath = operator_command(user, ["realpath", "--version"])
+    check(
+        "GNU" in realpath or re.match(r"realpath \(uutils coreutils\) \S", realpath) is not None,
+        "Toolchain realpath must be GNU or uutils coreutils; install a supported provider",
+    )
+    for tool in ("find", "grep"):
         check("GNU" in operator_command(user, [tool, "--version"]), f"Toolchain {tool} must be GNU")
     qemu = shutil.which("qemu-system-x86_64") or shutil.which("qemu-kvm")
     if qemu is None and Path("/usr/libexec/qemu-kvm").is_file():
