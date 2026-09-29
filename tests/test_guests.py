@@ -1,5 +1,6 @@
 """Exercise selected guest admission, ownership, readiness and private transport."""
 
+import ast
 import contextlib
 import copy
 import errno
@@ -123,6 +124,48 @@ class TestGuestHost(unittest.TestCase):
             ):
                 self.assertEqual(guest_host.main(), 1)
             self.assertEqual(json.loads(stdout.getvalue()), expected)
+
+    def read_error(self, event):
+        reader, writer = os.pipe()
+        os.write(writer, json.dumps(event).encode() + b"\n")
+        os.close(writer)
+        with (
+            os.fdopen(reader, "rb", buffering=0) as stream,
+            self.assertRaises(ValidationError) as caught,
+        ):
+            guests.read_event(SimpleNamespace(stdout=stream))
+        return str(caught.exception)
+
+    def test_host_reason_codes_map_to_controller_text(self):
+        for code, text in guests.HOST_REASONS.items():
+            with self.subTest(code=code):
+                event = {"error": "HOST-TEXT", "code": code}
+                self.assertEqual(self.read_error(event), "Native guest: " + text)
+        generic = (
+            "Native guest: operation failed; inspect ownership, configuration and prerequisites"
+        )
+        for event in [
+            {"error": "HOST-TEXT"},
+            {"error": "HOST-TEXT", "code": "unknown"},
+            {"error": "HOST-TEXT", "code": "VMID-IN-USE"},
+            {"error": "HOST-TEXT", "code": 1},
+            {"error": "HOST-TEXT", "code": None},
+            {"error": "HOST-TEXT", "code": ["vmid-in-use"]},
+            {"error": "HOST-TEXT", "code": {"vmid-in-use": 1}},
+            {"error": "HOST-TEXT", "code": "vmid-in-use", "detail": "HOST-TEXT"},
+            {"error": 1, "code": "vmid-in-use"},
+        ]:
+            with self.subTest(event=event):
+                self.assertEqual(self.read_error(event), generic)
+
+    def test_host_reason_codes_match_controller_map(self):
+        tree = ast.parse((ROOT / "scripts/guest_host.py").read_text())
+        codes = {
+            ast.literal_eval(node.args[1])
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "refuse"
+        }
+        self.assertEqual(codes, set(guests.HOST_REASONS))
 
     def test_host_refusals_carry_reason_codes(self):
         foreign = [{"vmid": self.host["vmid"], "type": "lxc", "node": self.host["proxmox_node"]}]
