@@ -1,6 +1,7 @@
 """Plan, provision or verify explicitly selected owned Linux guests."""
 
 import argparse
+import base64
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import stat
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 if __package__:
@@ -234,7 +236,12 @@ def guest_rpc(request, known_hosts, envelope, timeout):
         and result.returncode == 1
         and not result.stdout
     ):
-        diagnostics = {value: value for value in guest_verify.TOOLCHAIN_DIAGNOSTICS.values()}
+        diagnostics = {
+            value: value
+            for value in (
+                guest_verify.TOOLCHAIN_DIAGNOSTICS | guest_verify.KERNEL_DIAGNOSTICS
+            ).values()
+        }
         diagnostic = diagnostics.get(result.stderr.removesuffix("\n"))
         if diagnostic:
             raise ValidationError(diagnostic)
@@ -383,7 +390,10 @@ def host_ssh(host):
             "-o",
             "IdentitiesOnly=yes",
         ]
-    return argv + ["--", host["proxmox_ssh_host"], "python3 -u -c " + shlex.quote(host_source())]
+    # Keep the authenticated bootstrap below the operating system's per-argument limit.
+    encoded = base64.b64encode(zlib.compress(host_source().encode())).decode("ascii")
+    bootstrap = f"import base64,zlib;exec(zlib.decompress(base64.b64decode({encoded!r})))"
+    return argv + ["--", host["proxmox_ssh_host"], "python3 -u -c " + shlex.quote(bootstrap)]
 
 
 def validate_event(request, event, phase, level="clean"):
@@ -793,7 +803,13 @@ def main():
                     "proxmox_ssh_private_key_file",
                 )
             )
-            groups.setdefault(key, []).append(request_for(host, revision, source))
+            request = request_for(host, revision, source)
+            if args.prepare_level and args.level == "kernel-src":
+                request["kernel_source"] = guest_verify.level_json(
+                    (ROOT / "vars/kernel-source.json").read_text()
+                )
+                guest_verify.kernel_inputs(request["kernel_source"])
+            groups.setdefault(key, []).append(request)
         selected_mode = "level" if args.prepare_level else "restore" if args.restore else "teardown"
         if destructive:
             mode = selected_mode if args.apply else "plan-" + selected_mode

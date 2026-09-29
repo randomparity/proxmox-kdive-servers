@@ -19,6 +19,7 @@ import sys
 import tempfile
 import termios
 import time
+import urllib.parse
 import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -941,12 +942,186 @@ def check_toolchain(request, content):
         check(content[key] == observed[key], f"Toolchain {key} differs; restore or re-prepare")
 
 
+KERNEL_DIAGNOSTICS = {
+    message: message
+    for message in (
+        "Kernel source inputs invalid; select credential-free HTTPS repo and exact ref",
+        "Kernel source ref missing or ambiguous; select one tag, branch or full commit",
+        "Kernel source Git failed; preserve tree and inspect input/network privately",
+        "Kernel source content invalid; restore or re-prepare kernel-src",
+        "Kernel source path is not a real checkout directory; preserve it and inspect",
+        "Kernel source owner differs; restore kernel-src or inspect existing tree",
+        "Kernel source HEAD differs; restore kernel-src or preserve existing tree",
+        "Kernel source must be detached; restore kernel-src or preserve existing tree",
+        "Kernel source must be depth-one shallow; restore kernel-src or preserve existing tree",
+        "Kernel source has changes or artifacts; restore kernel-src or preserve existing tree",
+    )
+}
+
+
+def kernel_inputs(value):
+    message = "Kernel source inputs invalid; select credential-free HTTPS repo and exact ref"
+    check(isinstance(value, dict) and set(value) == {"repo", "ref"}, message)
+    repo, ref = value["repo"], value["ref"]
+    check(isinstance(repo, str) and 0 < len(repo) <= 2048, message)
+    check(not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in repo), message)
+    try:
+        parsed = urllib.parse.urlsplit(repo)
+        valid = (
+            parsed.scheme == "https"
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+            and (parsed.port is None or 1 <= parsed.port <= 65535)
+            and not parsed.query
+            and not parsed.fragment
+            and parsed.path.startswith("/")
+        )
+    except ValueError:
+        valid = False
+    check(valid, message)
+    check(
+        isinstance(ref, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}", ref)),
+        message,
+    )
+    check(
+        ".." not in ref
+        and "//" not in ref
+        and not ref.endswith((".", "/"))
+        and all(not part.startswith(".") and not part.endswith(".lock") for part in ref.split("/")),
+        message,
+    )
+
+
+def kernel_git(user, args, timeout=60):
+    argv = ["env", "GIT_TERMINAL_PROMPT=0", "git"]
+    for setting in (
+        "protocol.allow=never",
+        "protocol.https.allow=always",
+        "core.hooksPath=/dev/null",
+        "core.fsmonitor=false",
+        "credential.helper=",
+        "http.sslVerify=true",
+    ):
+        argv += ["-c", setting]
+    try:
+        return operator_command(user, argv + args, timeout).strip()
+    except GuestError:
+        raise GuestError(
+            "Kernel source Git failed; preserve tree and inspect input/network privately"
+        ) from None
+
+
+def kernel_commit(user, repo, ref):
+    if re.fullmatch(r"[a-f0-9]{40}", ref):
+        return ref
+    names = [ref] if ref.startswith("refs/") else ["refs/tags/" + ref, "refs/heads/" + ref]
+    patterns = [name + suffix for name in names for suffix in ("", "^{}")]
+    rows = kernel_git(user, ["ls-remote", "--exit-code", "--", repo, *patterns])
+    found = {}
+    message = "Kernel source ref missing or ambiguous; select one tag, branch or full commit"
+    for row in rows.splitlines():
+        fields = row.split()
+        check(len(fields) == 2 and re.fullmatch(r"[a-f0-9]{40}", fields[0]), message)
+        check(fields[1] in patterns and fields[1] not in found, message)
+        found[fields[1]] = fields[0]
+    commits = {found.get(name + "^{}", found.get(name)) for name in names} - {None}
+    check(len(commits) == 1, message)
+    return commits.pop()
+
+
+def kernel_path(account):
+    toolchain_source_path(account)
+    return Path(account.pw_dir) / "src" / "linux"
+
+
+def kernel_tree_owner(path, uid):
+    message = "Kernel source path is not a real checkout directory; preserve it and inspect"
+    try:
+        check(stat.S_ISDIR(path.lstat().st_mode), message)
+        check(stat.S_ISDIR((path / ".git").lstat().st_mode), message)
+    except OSError:
+        raise GuestError(message) from None
+
+    def failed(error):
+        raise GuestError(message) from error
+
+    for directory, dirs, files in os.walk(path, onerror=failed, followlinks=False):
+        for item in (Path(directory), *(Path(directory) / name for name in dirs + files)):
+            check(
+                item.lstat().st_uid == uid,
+                "Kernel source owner differs; restore kernel-src or inspect existing tree",
+            )
+
+
+def check_kernel_source(request, content):
+    message = "Kernel source content invalid; restore or re-prepare kernel-src"
+    check(isinstance(content, dict) and set(content) == {"repo", "ref", "commit"}, message)
+    kernel_inputs({key: content[key] for key in ("repo", "ref")})
+    check(
+        isinstance(content["commit"], str) and re.fullmatch(r"[a-f0-9]{40}", content["commit"]),
+        message,
+    )
+    user = request["host"]["ansible_user"]
+    account = pwd.getpwnam(user)
+    path = kernel_path(account)
+    kernel_tree_owner(path, account.pw_uid)
+    args = ["-C", str(path)]
+    check(
+        kernel_git(user, args + ["rev-parse", "--show-toplevel"]) == str(path),
+        "Kernel source path is not a real checkout directory; preserve it and inspect",
+    )
+    check(
+        kernel_git(user, args + ["rev-parse", "HEAD"]) == content["commit"],
+        "Kernel source HEAD differs; restore kernel-src or preserve existing tree",
+    )
+    check(
+        kernel_git(user, args + ["rev-parse", "--abbrev-ref", "HEAD"]) == "HEAD",
+        "Kernel source must be detached; restore kernel-src or preserve existing tree",
+    )
+    check(
+        kernel_git(user, args + ["rev-parse", "--is-shallow-repository"]) == "true"
+        and kernel_git(user, args + ["rev-list", "--count", "HEAD"]) == "1",
+        "Kernel source must be depth-one shallow; restore kernel-src or preserve existing tree",
+    )
+    check(
+        not kernel_git(
+            user, args + ["status", "--porcelain", "--untracked-files=all", "--ignored"]
+        ),
+        "Kernel source has changes or artifacts; restore kernel-src or preserve existing tree",
+    )
+
+
+def prepare_kernel_source(request):
+    inputs = request.get("kernel_source")
+    kernel_inputs(inputs)
+    user = request["host"]["ansible_user"]
+    path = kernel_path(pwd.getpwnam(user))
+    content = dict(inputs, commit=kernel_commit(user, inputs["repo"], inputs["ref"]))
+    if not path.exists() and not path.is_symlink():
+        kernel_git(user, ["init", "--quiet", str(path)])
+        kernel_git(
+            user,
+            ["-C", str(path), "fetch", "--depth=1", "--", inputs["repo"], content["commit"]],
+            900,
+        )
+        kernel_git(user, ["-C", str(path), "checkout", "--quiet", "--detach", "FETCH_HEAD"])
+    check_kernel_source(request, content)
+    return content
+
+
 LEVELS = (
     {
         "name": "toolchain",
         "parent": "clean",
         "prepare": prepare_toolchain,
         "check": check_toolchain,
+    },
+    {
+        "name": "kernel-src",
+        "parent": "toolchain",
+        "prepare": prepare_kernel_source,
+        "check": check_kernel_source,
     },
 )
 LEVEL_DIRECTORY = Path("/var/lib/kdive-levels")
@@ -1149,7 +1324,7 @@ def main():
             and isinstance(envelope, dict)
             and set(envelope) == {"request", "level_operation", "level", "chain", "proposed"}
         ):
-            diagnostic = TOOLCHAIN_DIAGNOSTICS.get(str(error))
+            diagnostic = (TOOLCHAIN_DIAGNOSTICS | KERNEL_DIAGNOSTICS).get(str(error))
         print(
             diagnostic
             or (
