@@ -604,8 +604,22 @@ packages are allowed; changing recorded critical versions fails verification.
 
 Rocky preparation adds the operator-approved Docker stable RHEL repository and verifies its
 signing key before import, preserving TLS and RPM signature checks. It refuses conflicting
-configuration rather than replacing it. No other package repositories are added. openSUSE
-remains best-effort; this level does not imply KDIVE worker-host support. Missing packages
+configuration rather than replacing it. Rocky also uses stock RPM-verified CRB sources
+(per toolchain transaction) and signed `epel-release` bootstrap from Rocky Extras for
+EPEL 10.2 packages. DNF transactions select only BaseOS, AppStream, Extras, CRB, stable
+EPEL and the approved Docker source, with TLS and package signature checks enabled.
+Altered repository/key files, unowned EPEL configuration and duplicate source IDs are
+refused. Source selection is reproducible; signed package revisions can advance and
+are recorded in the installed inventory at capture.
+
+Rocky gets `shfmt v3.14.1` from the [official linux_amd64 release](https://github.com/mvdan/sh/releases/tag/v3.14.1),
+with SHA-256 `76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf`.
+The download uses HTTPS and a pinned checksum; no detached signature is claimed.
+Preparation preserves conflicting `/usr/local/bin/shfmt` content. Verification checks
+its digest, ownership/mode, operator login resolution and version instead of requiring
+a Rocky shfmt RPM. Other distributions retain their packaged shfmt requirement.
+
+openSUSE remains best-effort; this level does not imply KDIVE worker-host support. Missing packages
 or service failures stop preparation for inspection; there is no automatic rollback.
 
 Native proof on 2026-09-28: Ubuntu 24.04, Fedora 44 and openSUSE Leap 16.0 reached READY.
@@ -615,11 +629,12 @@ each fault and re-verified the level. AppArmor/SELinux baseline checks stayed en
 `clean` and `toolchain` retained. openSUSE installs `polkit` explicitly so its existing libvirt
 group authorization policy works without enabling recommended packages wholesale.
 
-Rocky 10.2 stopped before READY with the native DNF error
+The prior Rocky 10.2 attempt stopped before READY with the native DNF error
 `Unable to find a match: libvirt-devel ShellCheck shfmt` using BaseOS, AppStream, Extras and
 the approved Docker source. No extra repository was enabled to bypass this gap. The failed
 attempt retains inspectable partial state and its original `clean`; it has no `toolchain`
-snapshot.
+snapshot. The source fix above awaits separately authorized live preparation and snapshot
+proof; it does not claim to have repaired that preserved guest state.
 
 Measured snapshot allocation above `clean`:
 
