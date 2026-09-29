@@ -33,6 +33,8 @@ Oversubscribed guests can contend for CPU and RAM; the operator controls concurr
 Host swap or OOM under full load is possible and is not detected by admission. Stdout
 remains one JSON result per guest. Controller and host code ship together, so the new
 event needs no version negotiation. Other host error text is still not passed through.
+The Ansible playbooks hide controller stderr under `no_log`, so an oversubscribed
+playbook run succeeds without a visible warning; `make provision` shows it.
 
 ## Considered & rejected
 
