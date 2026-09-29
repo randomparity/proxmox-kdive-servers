@@ -315,5 +315,190 @@ class ToolchainTests(unittest.TestCase):
                 g.check_docker_key(invalid)
 
 
+class RockySourceTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def source_files(self, epel=False):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            repo = directory / "rocky.repo"
+            repo.write_text("[baseos]\n[appstream]\n[extras]\n[crb]\n")
+            owned = [str(repo)]
+            if epel:
+                source = directory / "epel.repo"
+                source.write_text("[epel]\n")
+                owned.append(str(source))
+
+            def path(value):
+                if value == "/etc/yum.repos.d":
+                    return directory
+                if value == "/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-10":
+                    return directory / "key"
+                return Path(value)
+
+            def command(argv, timeout=60):
+                if argv[:2] == ["rpm", "-ql"]:
+                    return "\n".join(owned)
+                return ""
+
+            with (
+                patch.object(g, "Path", side_effect=path),
+                patch.object(g, "command", side_effect=command) as run,
+            ):
+                yield directory, owned, run
+
+    def test_rocky_sources_validate_owned_configs_and_reject_conflicts(self):
+        for epel in (False, True):
+            with self.source_files(epel) as (directory, _, _):
+                g.check_rocky_repositories(epel)
+                for content in ("[crb]\n", "[epel]\n", "[epel-testing]\n", "not ini"):
+                    conflict = directory / "foreign.repo"
+                    conflict.write_text(content)
+                    with self.assertRaises(g.GuestError):
+                        g.check_rocky_repositories(epel)
+                    conflict.unlink()
+                original = directory / "rocky.repo"
+                original.rename(directory / "source")
+                original.symlink_to(directory / "source")
+                with self.assertRaises(g.GuestError):
+                    g.check_rocky_repositories(epel)
+
+    def test_rocky_sources_reject_modified_rpm_files(self):
+        with patch.object(g, "command", return_value="S.5....T. c repository"):
+            with self.assertRaisesRegex(g.GuestError, "repository differs"):
+                g.check_rocky_repositories()
+
+    def test_rocky_sources_bootstrap_only_without_conflicting_files(self):
+        with self.source_files() as (directory, owned, run):
+            calls = []
+            original = run.side_effect
+
+            def bootstrap(argv, timeout=60):
+                calls.append(argv)
+                if "install" in argv:
+                    (directory / "epel.repo").write_text("[epel]\n")
+                    owned.append(str(directory / "epel.repo"))
+                return original(argv, timeout)
+
+            run.side_effect = bootstrap
+            g.prepare_rocky_repositories()
+            install = next(argv for argv in calls if "install" in argv)
+            self.assertIn("--disablerepo=*", install)
+            self.assertIn("--enablerepo=baseos,appstream,extras,crb", install)
+            self.assertIn("--setopt=*.gpgcheck=1", install)
+            self.assertIn("--setopt=*.sslverify=1", install)
+            self.assertEqual(install[-1], "epel-release")
+        for filename in ("epel.repo", "key"):
+            with self.source_files() as (directory, _, run):
+                (directory / filename).write_text("# existing configuration")
+                with self.assertRaisesRegex(g.GuestError, "conflict"):
+                    g.prepare_rocky_repositories()
+                self.assertFalse(any("install" in call.args[0] for call in run.call_args_list))
+
+    @contextlib.contextmanager
+    def binary_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "shfmt"
+            path.write_bytes(b"approved binary")
+            path.chmod(0o755)
+            real_stat = Path.lstat
+
+            def metadata(target):
+                info = real_stat(target)
+                return SimpleNamespace(
+                    st_mode=info.st_mode & ~0o022 if stat.S_ISDIR(info.st_mode) else info.st_mode,
+                    st_uid=0,
+                )
+
+            with (
+                patch.object(Path, "lstat", metadata),
+                patch.object(g, "SHFMT_SHA256", hashlib.sha256(b"approved binary").hexdigest()),
+            ):
+                yield path
+
+    def test_rocky_shfmt_rejects_hash_modes_links_and_missing_file(self):
+        with self.binary_file() as path:
+            g.check_rocky_shfmt(path)
+            path.write_bytes(b"unapproved")
+            with self.assertRaises(g.GuestError):
+                g.check_rocky_shfmt(path)
+            path.write_bytes(b"approved binary")
+            for mode in (0o775, 0o644):
+                path.chmod(mode)
+                with self.assertRaises(g.GuestError):
+                    g.check_rocky_shfmt(path)
+            path.unlink()
+            with self.assertRaises(g.GuestError):
+                g.check_rocky_shfmt(path)
+            path.symlink_to(path.parent / "absent")
+            with self.assertRaises(g.GuestError):
+                g.check_rocky_shfmt(path)
+
+    def test_rocky_shfmt_operator_path_and_version_are_verified(self):
+        with self.binary_file() as path, patch.object(g, "Path", return_value=path):
+            for actual, version in (
+                ("/usr/local/bin/shfmt", "v3.14.1"),
+                ("/usr/bin/shfmt", "v3.14.1"),
+                ("/usr/local/bin/shfmt", "v3.0.0"),
+            ):
+                with patch.object(g, "operator_command", side_effect=[actual, version]):
+                    if actual == "/usr/local/bin/shfmt" and version == "v3.14.1":
+                        g.check_rocky_operator_shfmt("operator")
+                    else:
+                        with self.assertRaises(g.GuestError):
+                            g.check_rocky_operator_shfmt("operator")
+
+    def test_rocky_shfmt_existing_conflict_is_never_overwritten(self):
+        with (
+            self.binary_file() as path,
+            patch.object(g, "Path", return_value=path),
+            patch.object(g, "toolchain_command") as run,
+        ):
+            path.write_bytes(b"operator content")
+            with self.assertRaises(g.GuestError):
+                g.prepare_rocky_shfmt()
+            self.assertEqual(path.read_bytes(), b"operator content")
+            run.assert_not_called()
+
+    def test_rocky_shfmt_download_digest_and_exclusive_install(self):
+        for content in (b"approved binary", b"corrupt download"):
+            with self.binary_file() as path:
+                path.unlink()
+
+                def redirect(value):
+                    return path if value == "/usr/local/bin/shfmt" else Path(value)
+
+                def download(argv, operation, timeout, content=content):
+                    self.assertIn("--proto-redir", argv)
+                    Path(argv[argv.index("--output") + 1]).write_bytes(content)
+
+                with (
+                    patch.object(g, "Path", side_effect=redirect),
+                    patch.object(g, "toolchain_command", side_effect=download),
+                ):
+                    if content == b"approved binary":
+                        g.prepare_rocky_shfmt()
+                        self.assertEqual(path.read_bytes(), content)
+                    else:
+                        with self.assertRaisesRegex(g.GuestError, "shfmt differs"):
+                            g.prepare_rocky_shfmt()
+                        self.assertFalse(path.exists())
+                self.assertEqual(list(path.parent.glob(".kdive-shfmt-*")), [])
+
+    def test_rocky_preparation_replaces_only_rpm_requirement(self):
+        self.assertNotIn("shfmt", g.toolchain_packages("rocky"))
+        for profile in ("ubuntu", "fedora", "opensuse"):
+            self.assertIn("shfmt", g.toolchain_packages(profile))
+        request = {"host": {"profile": "rocky", "ansible_user": "operator"}}
+        with (
+            patch.object(
+                g, "prepare_rocky_repositories", side_effect=RuntimeError("sources first")
+            ),
+            patch.object(g.pwd, "getpwnam"),
+            patch.object(g, "toolchain_source_path"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "sources first"):
+                g.prepare_toolchain(request)
+
+
 if __name__ == "__main__":
     unittest.main()
