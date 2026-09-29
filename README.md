@@ -252,6 +252,12 @@ extent size. Admission rounds the root and auxiliary reservations to that geomet
 disk readback accepts only bounded, extent-aligned allocations. ZFS retains its native
 allocation checks. An unavailable or malformed extent report fails before allocation.
 
+Choose storage by how levels will be used. On `lvmthin`, restore may move to any level and
+back up again with every other snapshot kept. On `zfspool`, rollback is possible only to the
+newest snapshot, so a lower level requires the operator to remove every newer level snapshot
+first (see ADR 0013, which amends ADR 0007). LVM-thin has no data checksums or compression,
+and exhausting thin-pool data or metadata space pauses guests, so monitor pool usage.
+
 Assign explicit unused template IDs. Template CPU/RAM/NIC values are placeholders;
 guest CPU, sizing, networking and storage come from inventory. Template validation permits
 unassigned guest `vmid`, `ansible_host`, `ipv4_cidr`, `gateway` and `dns_servers`;
@@ -608,7 +614,8 @@ Restore admits native chain metadata before stopping or rolling back, so a stopp
 guest with damaged disk contents can recover. After rollback it boots and checks guest content.
 On ZFS storage, newer snapshots block rollback to a lower level, including `clean`; admission
 fails before shutdown and asks the operator to inspect/remove newer snapshots. It never removes
-them automatically. The same check applies to the read-only restore plan. Cooperative locks and
+them automatically. The same check applies to the read-only restore plan. `lvmthin` storage
+has no such restriction; see the storage guidance above. Cooperative locks and
 `EXCLUSIVE` cannot fence a separate privileged operator changing snapshots outside this tool.
 
 ### Toolchain preparation
@@ -691,7 +698,7 @@ Measured snapshot allocation above `clean`:
 | openSUSE Leap 16.0 | 1005.34 | 867.96 |
 | Rocky 10.2 | 1593.07 | 1509.36 |
 
-These are native ZFS `written@clean` and `referenced` differences at the captured toolchain
+These are historical ZFS measurements: native ZFS `written@clean` and `referenced` differences at the captured toolchain
 snapshot, summed across root and EFI volumes (1 MiB = 1,048,576 bytes). They exclude disk
 reservations and are measurements of these package versions, not capacity guarantees.
 
@@ -738,7 +745,7 @@ Measured root-volume allocation above `toolchain` at READY:
 | Ubuntu 24.04 | 934.66 | 785.68 |
 | Fedora 44 | 705.05 | 537.04 |
 
-These are native ZFS `written@toolchain` and `referenced` differences against the
+These are historical ZFS measurements: native ZFS `written@toolchain` and `referenced` differences against the
 parent snapshot (1 MiB = 1,048,576 bytes), excluding disk reservations. They measure
 these prepared trees and guest writes, not a capacity guarantee.
 
@@ -818,7 +825,7 @@ one passing HTTP authorization test with zero skips and strict stack revision ch
 No setup or Ansible step ran after restore. Final verification passed and the guest stopped.
 
 Restore took 90.271 seconds; the test started 41.132 seconds after restore completed, or
-131.402 seconds after restore began (controller-observed test-start marker). Native ZFS
+131.402 seconds after restore began (controller-observed test-start marker). Historical ZFS measurement: native ZFS
 allocation above `kernel-src` was 6,853.27 MiB written and 6,125.94 MiB additional referenced
 data. These measurements include the explicitly preserved setup attempts and are not a
 minimal clean-install size. The corrected final verifier was proven against that installation;
@@ -836,6 +843,6 @@ lifecycle witness as not deployed. No setup or Ansible step ran after restore. T
 stopped with no containers or workers left, final verification passed and the guest stopped.
 
 Restore took 95.071 seconds; the test started 39.316 seconds after restore completed, or
-134.387 seconds after restore began (guest clock test-start marker). Native ZFS allocation
+134.387 seconds after restore began (guest clock test-start marker). Historical ZFS measurement: native ZFS allocation
 above `kernel-src` was 9,245.50 MiB written and 9,152.84 MiB additional referenced data for
 a single clean installation.
