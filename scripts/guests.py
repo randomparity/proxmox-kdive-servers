@@ -41,6 +41,16 @@ else:
 
 
 REBOOT_DISCONNECTED = object()
+# Controller-owned text for the host reason codes of ADR 0015; host error text is never shown.
+HOST_REASONS = {
+    "vmid-in-use": "guest ID belongs to another resource; inspect it or select an unused vmid",
+    "template-absent": "selected template is absent; create it with make templates APPLY=1",
+    "nesting-disabled": "host lacks hardware or nested virtualization; operator must enable it",
+    "guests-missing": "operation requires existing owned guests; provision them first",
+    "ownership-differs": "selected guest ownership differs; teardown refused",
+    "storage-insufficient": "insufficient reported storage space; release storage before retry",
+    "disk-too-small": "guest root disk is smaller than the template allocation; increase disk_gib",
+}
 
 
 def request_for(host, revision, source):
@@ -498,11 +508,16 @@ def read_event(process):
         event = json.loads(line)
     except ValueError:
         raise ValidationError("Native guest: invalid result; inspect private host state") from None
-    require(
-        not isinstance(event, dict) or "error" not in event,
-        "Native guest",
-        "operation failed; inspect ownership, configuration and prerequisites",
-    )
+    if isinstance(event, dict) and "error" in event:
+        reason = "operation failed; inspect ownership, configuration and prerequisites"
+        code = event.get("code")
+        if (
+            set(event) == {"error", "code"}
+            and isinstance(event["error"], str)
+            and type(code) is str
+        ):
+            reason = HOST_REASONS.get(code, reason)
+        raise ValidationError(f"Native guest: {reason}")
     return event
 
 

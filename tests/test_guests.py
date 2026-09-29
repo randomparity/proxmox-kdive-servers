@@ -1,5 +1,6 @@
 """Exercise selected guest admission, ownership, readiness and private transport."""
 
+import ast
 import contextlib
 import copy
 import errno
@@ -90,13 +91,91 @@ class TestGuestHost(unittest.TestCase):
                 self.assertEqual(guest_host.check_capacity(requests, changed, mem, pools), expected)
         with self.assertRaises(guest_host.GuestError):
             guest_host.check_capacity([self.request], node, "MemFree: 8388608 kB\n", pools)
-        with self.assertRaises(guest_host.GuestError):
+        with self.assertRaises(guest_host.ReasonError) as caught:
             guest_host.check_capacity(
                 [self.request, self.request],
                 node,
                 "MemAvailable: 1 kB\n",
                 {"pool": dict(storage, avail=32 * 1024**3)},
             )
+        self.assertEqual(caught.exception.code, "storage-insufficient")
+        for status in [{"extent_bytes": 0}, dict(storage, avail=None), dict(storage, avail=1.0)]:
+            with self.subTest(status=status), self.assertRaises(guest_host.GuestError) as caught:
+                guest_host.check_capacity([self.request], node, memory, {"pool": status})
+            self.assertNotIsInstance(caught.exception, guest_host.ReasonError)
+
+    def test_host_main_codes_only_reason_errors(self):
+        envelope = {
+            "requests": [],
+            "mode": "plan",
+            "confirmed": False,
+            "exclusive": False,
+            "level": "clean",
+        }
+        for error, expected in [
+            (
+                guest_host.ReasonError("vmid-in-use", "taken"),
+                {"error": "taken", "code": "vmid-in-use"},
+            ),
+            (guest_host.GuestError("Invalid selected batch"), {"error": "Invalid selected batch"}),
+        ]:
+            stdout = io.StringIO()
+            with (
+                self.subTest(expected=expected),
+                patch.object(guest_host, "read_line", return_value=envelope),
+                patch.object(guest_host, "session", side_effect=error),
+                contextlib.redirect_stdout(stdout),
+            ):
+                self.assertEqual(guest_host.main(), 1)
+            self.assertEqual(json.loads(stdout.getvalue()), expected)
+
+    def read_error(self, event):
+        reader, writer = os.pipe()
+        os.write(writer, json.dumps(event).encode() + b"\n")
+        os.close(writer)
+        with (
+            os.fdopen(reader, "rb", buffering=0) as stream,
+            self.assertRaises(ValidationError) as caught,
+        ):
+            guests.read_event(SimpleNamespace(stdout=stream))
+        return str(caught.exception)
+
+    def test_host_reason_codes_map_to_controller_text(self):
+        for code, text in guests.HOST_REASONS.items():
+            with self.subTest(code=code):
+                event = {"error": "HOST-TEXT", "code": code}
+                self.assertEqual(self.read_error(event), "Native guest: " + text)
+        generic = (
+            "Native guest: operation failed; inspect ownership, configuration and prerequisites"
+        )
+        for event in [
+            {"error": "HOST-TEXT"},
+            {"error": "HOST-TEXT", "code": "unknown"},
+            {"error": "HOST-TEXT", "code": "VMID-IN-USE"},
+            {"error": "HOST-TEXT", "code": 1},
+            {"error": "HOST-TEXT", "code": None},
+            {"error": "HOST-TEXT", "code": ["vmid-in-use"]},
+            {"error": "HOST-TEXT", "code": {"vmid-in-use": 1}},
+            {"error": "HOST-TEXT", "code": "vmid-in-use", "detail": "HOST-TEXT"},
+            {"error": 1, "code": "vmid-in-use"},
+        ]:
+            with self.subTest(event=event):
+                self.assertEqual(self.read_error(event), generic)
+
+    def test_host_reason_codes_match_controller_map(self):
+        tree = ast.parse((ROOT / "scripts/guest_host.py").read_text())
+        codes = {
+            ast.literal_eval(node.args[1])
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "refuse"
+        }
+        self.assertEqual(codes, set(guests.HOST_REASONS))
+
+    def test_host_refusals_carry_reason_codes(self):
+        foreign = [{"vmid": self.host["vmid"], "type": "lxc", "node": self.host["proxmox_node"]}]
+        with self.assertRaises(guest_host.ReasonError) as caught:
+            guest_host.resource_present(self.request, foreign)
+        self.assertEqual(caught.exception.code, "vmid-in-use")
 
     def test_baseline_identity_binds_config_but_not_controller_revision(self):
         identity = guest_host.identity(self.request)
@@ -1572,10 +1651,11 @@ class TestNativeLifecycle(unittest.TestCase):
         with (
             self.oversubscribed_node(),
             contextlib.redirect_stdout(output),
-            self.assertRaisesRegex(guest_host.GuestError, "Verify requires existing"),
+            self.assertRaisesRegex(guest_host.GuestError, "Verify requires existing") as caught,
         ):
             guest_host.session([self.req], "verify")
         self.assertEqual(output.getvalue(), "")
+        self.assertEqual(caught.exception.code, "guests-missing")
 
     def test_legacy_disabled_guest_without_explicit_shares_verifies(self):
         self.req["host"]["balloon_mib"] = 0
