@@ -66,9 +66,13 @@ def marker(request, phase):
 
 def validate_request(request):
     check(
-        isinstance(request, dict) and set(request) == {"host", "template", "revision"},
+        isinstance(request, dict)
+        and set(request)
+        in ({"host", "template", "revision"}, {"host", "template", "revision", "kernel_source"}),
         "Invalid guest request",
     )
+    if "kernel_source" in request:
+        guest_verify.kernel_inputs(request["kernel_source"])
     validate_host(request["host"])
     template_host.validate_request(request["template"])
     h, t = request["host"], request["template"]

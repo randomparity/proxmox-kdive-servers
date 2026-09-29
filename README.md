@@ -545,7 +545,8 @@ Snapshots cover VM state only, not external services, DNS, backups or test artif
 
 The level contract supports an ordered, closed registry above `clean`. The implemented
 `toolchain` level prepares developer headers and tools, Docker Engine with Compose, local
-libvirt/QEMU, and operator `uv`/`just`. Its parent is `clean`. There is no configurable plugin
+libvirt/QEMU, and operator `uv`/`just`. Its parent is `clean`. `kernel-src` adds a pinned,
+shallow, detached, unbuilt Linux source checkout above `toolchain`. There is no configurable plugin
 loader or test-level switch.
 
 `LEVEL` defaults to `clean` for `make verify` and `make restore`. Existing clean metadata and
@@ -630,3 +631,32 @@ Measured snapshot allocation above `clean`:
 These are native ZFS `written@clean` and `referenced` differences at the captured toolchain
 snapshot, summed across root and EFI volumes (1 MiB = 1,048,576 bytes). They exclude disk
 reservations and are measurements of these package versions, not capacity guarantees.
+
+
+### Kernel source level
+
+`vars/kernel-source.json` supplies exactly `repo` and `ref` for preparation. The defaults
+are the upstream stable HTTPS repository and `v6.9`, matching KDIVE's fetch helper. Edit
+these inputs before preparing a new snapshot to select a different ref. Repositories must
+use credential-free HTTPS; refs must be a full lowercase 40-hex commit or an unambiguous
+exact tag/branch. Preparation resolves the ref once and records `repo`, `ref` and `commit`
+in `/var/lib/kdive-levels/kernel-src.json` and the emitted snapshot metadata.
+
+```sh
+make level LEVEL=kernel-src TARGETS=ubuntu
+make level LEVEL=kernel-src TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
+# Capture the stopped guest with the exact emitted name/description and no RAM.
+make verify LEVEL=kernel-src TARGETS=ubuntu
+make restore LEVEL=kernel-src TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
+```
+
+The existing `toolchain` parent must verify first. Git runs as the operator account at
+`~/src/linux`; preparation refuses an existing mismatching checkout without resetting or
+removing it. A failed initial fetch can leave a partial tree: inspect it before retrying,
+and let the operator decide its disposition. No package changes or kernel builds occur.
+Verification uses recorded metadata offline; changing inputs or moving a remote tag does
+not invalidate a captured level. It checks the real checkout and `.git` directories,
+recursive ownership, detached matching HEAD, depth-one shallow history and clean status,
+including ignored build products such as `.config` and object files. Deepening history,
+configuring or building in this tree makes verification fail. Restore the captured level
+or deliberately prepare a replacement; the tool does not delete trees or snapshots.
