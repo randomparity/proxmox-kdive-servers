@@ -610,9 +610,13 @@ EPEL 10.2 packages. DNF transactions select only BaseOS, AppStream, Extras, CRB,
 EPEL and the approved Docker source, with TLS and package signature checks enabled.
 Altered repository/key files, unowned EPEL configuration and duplicate source IDs are
 refused. Source selection is reproducible; signed package revisions can advance and
-are recorded in the installed inventory at capture.
+are recorded in the installed inventory at capture. Rocky also installs and checks
+`kernel-modules-extra` matching the running kernel, which pulls its matching modules;
+installing only the newest kernel modules leaves the baseline kernel without Docker's
+required `xt_addrtype` networking module.
 
-Rocky gets `shfmt v3.14.1` from the [official linux_amd64 release](https://github.com/mvdan/sh/releases/tag/v3.14.1),
+Rocky gets `shfmt v3.14.1` from the
+[official linux_amd64 release](https://github.com/mvdan/sh/releases/tag/v3.14.1),
 with SHA-256 `76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf`.
 The download uses HTTPS and a pinned checksum; no detached signature is claimed.
 Preparation preserves conflicting `/usr/local/bin/shfmt` content. Verification checks
@@ -629,12 +633,21 @@ each fault and re-verified the level. AppArmor/SELinux baseline checks stayed en
 `clean` and `toolchain` retained. openSUSE installs `polkit` explicitly so its existing libvirt
 group authorization policy works without enabling recommended packages wholesale.
 
-The prior Rocky 10.2 attempt stopped before READY with the native DNF error
-`Unable to find a match: libvirt-devel ShellCheck shfmt` using BaseOS, AppStream, Extras and
-the approved Docker source. No extra repository was enabled to bypass this gap. The failed
-attempt retains inspectable partial state and its original `clean`; it has no `toolchain`
-snapshot. The source fix above awaits separately authorized live preparation and snapshot
-proof; it does not claim to have repaired that preserved guest state.
+Rocky 10.2 native proof on 2026-09-28 used verifier commit
+`1ac2316a5bc4274dff1f5848294b205858aed1c1`: clean restore → prepare → READY →
+operator no-RAM `toolchain` capture → verify/restore passed. CRB supplied
+`libvirt-devel 11.10.0-12.4.el10_2`; EPEL 10.2 supplied `ShellCheck 0.10.0-3.el10_0`,
+bootstrapped by Rocky-signed `epel-release 10-7.el10_1`. Captured versions were
+Docker 29.8.1, libvirt 11.10.0, uv 0.12.19 and just 1.58.0; shfmt's installed digest
+and v3.14.1 version matched the approved binary. The initial live attempt exposed the
+running-kernel module gap described above; the corrected clean-to-READY retry passed.
+
+Renaming shfmt produced `Toolchain shfmt differs or unavailable; restore toolchain or re-prepare`.
+Removing the operator's docker membership independently produced
+`Toolchain operator missing docker group; restore toolchain or re-prepare`.
+Each fault was followed by a successful snapshot restore and re-verification.
+The final guest retained `clean` and `toolchain`, stopped with SELinux enforcing.
+Rocky's `kernel-src` and `kdive` levels remain unprepared and unverified.
 
 Measured snapshot allocation above `clean`:
 
@@ -643,6 +656,7 @@ Measured snapshot allocation above `clean`:
 | Ubuntu 24.04 | 820.29 | 786.87 |
 | Fedora 44 | 1751.84 | 1667.27 |
 | openSUSE Leap 16.0 | 1005.34 | 867.96 |
+| Rocky 10.2 | 1593.07 | 1509.36 |
 
 These are native ZFS `written@clean` and `referenced` differences at the captured toolchain
 snapshot, summed across root and EFI volumes (1 MiB = 1,048,576 bytes). They exclude disk
@@ -703,7 +717,7 @@ preserved and refused. Preparation delegates `just setup` and the upstream local
 host play. It requires installed Python 3.14; the upstream play must provide its native
 `guestfs` binding. Ubuntu 24.04 currently lacks that interpreter; the approved first proof
 uses Fedora 44, with Ubuntu proof deferred to the template owner. openSUSE is excluded;
-Rocky still requires its missing toolchain prerequisites.
+Rocky has a verified toolchain snapshot; its kernel-source and KDIVE preparation remain unverified.
 
 ```sh
 make level LEVEL=kdive TARGETS=fedora
