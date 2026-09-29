@@ -142,6 +142,37 @@ class KdiveContractTests(unittest.TestCase):
         ):
             g.check_kdive({}, content)
 
+    def test_replacing_either_ancestor_invalidates_native_kdive_binding(self):
+        from tests.test_levels import TestLevelSnapshots
+
+        levels = g.LEVELS
+        fixture = TestLevelSnapshots()
+        fixture.setUp()
+        try:
+            with patch.object(g, "LEVELS", levels):
+                for name, parent in (
+                    ("toolchain", "clean"),
+                    ("kernel-src", "toolchain"),
+                    ("kdive", "kernel-src"),
+                ):
+                    fixture.capture(name, parent)
+                config = fixture.fixture.guests[1101]["config"]
+                guest_host.baseline(fixture.req, config, "kdive")
+                saved = copy.deepcopy(fixture.fixture.snapshots)
+                for ancestor in ("toolchain", "kernel-src"):
+                    fixture.fixture.snapshots = copy.deepcopy(saved)
+                    row = fixture.fixture.snapshots[1101][ancestor]
+                    metadata = json.loads(row["description"])
+                    metadata["content"] = {"replacement": True}
+                    row["description"] = json.dumps(metadata)
+                    with (
+                        self.subTest(ancestor=ancestor),
+                        self.assertRaisesRegex(ValueError, "parent identity differs"),
+                    ):
+                        guest_host.baseline(fixture.req, config, "kdive")
+        finally:
+            fixture.doCleanups()
+
     def test_native_binding_credentials_are_exact_private_files(self):
         with tempfile.TemporaryDirectory() as temp:
             file = Path(temp) / "dsn"

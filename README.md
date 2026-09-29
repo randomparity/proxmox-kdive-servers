@@ -745,3 +745,19 @@ KDIVE preparation installs `python3-packaging` from the guest's configured repos
 and checks its import in `/usr/bin/python3` before invoking the host play. This is the
 Ansible pip module's interpreter prerequisite, owned by this integration; it does not
 change the ancestor toolchain package contract or replace upstream installer tasks.
+
+Fedora 44 native proof used KDIVE commit
+`dffce52ab48227ba7b8807824e1f79bb96dc18f6`. Upstream setup, host installation,
+stack start and clean stop completed. A final systemd template-query defect was corrected;
+the existing manifest and full parent chain were then audited through normal verification
+and the unchanged native stop/READY handshake, without replaying installation. The operator
+captured `kdive` without RAM. Ordinary verification and restore passed, followed by exactly
+one passing HTTP authorization test with zero skips and strict stack revision checking.
+No setup or Ansible step ran after restore. Final verification passed and the guest stopped.
+
+Restore took 90.271 seconds; the test started 41.132 seconds after restore completed, or
+131.402 seconds after restore began (controller-observed test-start marker). Native ZFS
+allocation above `kernel-src` was 6,853.27 MiB written and 6,125.94 MiB additional referenced
+data. These measurements include the explicitly preserved setup attempts and are not a
+minimal clean-install size. The corrected final verifier was proven against that installation;
+the entire fresh-install command was not replayed after the query-only correction.
