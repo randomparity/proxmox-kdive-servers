@@ -407,7 +407,8 @@ or new RAM exceeds `MemAvailable`, admission prints a capacity warning per nativ
 host to stderr and proceeds. Apply prints it for the pre-apply plan and again for
 the locked recheck. These are observations, not dedicated-core reservations: the
 operator controls concurrent workloads. The Ansible entrypoints hide controller
-output under `no_log`, so run the `make` plan to see warnings. Missing storage
+output under `no_log` but print these warning lines from a successful run; on failure
+Ansible censors the result, so run the `make` plan to see them. Missing storage
 capacity, missing or invalid CPU/memory metrics, nesting, source ownership or native
 evidence fails before allocation. The host is never reconfigured or rebooted, and
 there is no TCG fallback.
