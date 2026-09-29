@@ -195,6 +195,11 @@ other workloads. Even two lanes need 64 GiB available RAM plus host headroom.
 The existing live admission checks remain authoritative; thin provisioning is
 not a substitute for free capacity. A 4 TB pool is not all available to this lab.
 
+Run the #2807 installation proofs on the dedicated
+[clean-only installation guests](#clean-only-installation-guests), not on the `kdive` level,
+which is warm-fixture preparation rather than installation evidence (see
+[KDIVE installed level](#kdive-installed-level)).
+
 Ubuntu, Fedora and Rocky provide the three host-family representatives for
 #2807. openSUSE remains available for the broader #2803 guest matrix; its presence
 does not extend KDIVE's supported host-installation families. Keep nested KVM and
@@ -785,6 +790,25 @@ parent snapshot (1 MiB = 1,048,576 bytes), excluding disk reservations. They mea
 these prepared trees and guest writes, not a capacity guarantee.
 
 ### KDIVE installed level
+
+This level is warm-fixture preparation for later KDIVE validation entries
+([KDIVE #2808](https://github.com/randomparity/kdive/issues/2808) through
+[#2817](https://github.com/randomparity/kdive/issues/2817)). It is not KDIVE #2807
+clean-host installation evidence, and its proof does not replace one. Run installation proofs
+on the [clean-only installation guests](#clean-only-installation-guests). The level differs
+from a clean-host installation in these ways:
+
+- It sits above `toolchain`, which already installs libvirt/QEMU, Docker and the operator's
+  group memberships that the KDIVE host play is expected to provide.
+- It installs `python3-packaging` itself before the host play.
+- It runs `ansible-playbook` directly, not the documented
+  `examples/local-libvirt/install-host.sh` entry point.
+- It performs no real guest provision/boot and no repeat setup; its proof is not a nested VM
+  provisioning or kdump proof.
+
+The `python3-packaging` install and the direct playbook invocation live only in
+`prepare_kdive` in `scripts/guest_verify.py`. No other path, including installation-proof
+tooling, reuses them.
 
 `vars/kdive-source.json` selects an HTTPS repository and full commit for preparation only.
 The checkout lives at the operator's `~/src/kdive`; mismatching or dirty existing trees are
