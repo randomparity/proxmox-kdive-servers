@@ -67,6 +67,7 @@ def request_for(host, revision, source):
         "nic_model",
         "nic_queues",
         "balloon_mib",
+        "cloudinit_snippet_storage",
         "proxmox_api_host",
         "proxmox_api_port",
         "proxmox_ssh_host",

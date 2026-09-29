@@ -30,12 +30,33 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(validate_inventory(self.data), 4)
         self.assertEqual(validate_inventory(self.data, "ubuntu,fedora"), 2)
         self.host["profile"] = "fedora"
+        self.host.pop("cloudinit_snippet_storage")
         self.assertEqual(validate_inventory(self.data), 4)
+
+    def test_snippet_storage_is_ubuntu_only(self):
+        self.assertEqual(self.host["cloudinit_snippet_storage"], "local")
+        self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
+        for value in (None, "bad id!", 3):
+            with self.subTest(value=value):
+                changed = copy.deepcopy(self.data)
+                host = changed["_meta"]["hostvars"]["ubuntu"]
+                if value is None:
+                    host.pop("cloudinit_snippet_storage")
+                else:
+                    host["cloudinit_snippet_storage"] = value
+                with self.assertRaisesRegex(ValidationError, "cloudinit_snippet_storage"):
+                    validate_inventory(changed, "fedora")
+        self.data["_meta"]["hostvars"]["fedora"]["cloudinit_snippet_storage"] = "local"
+        with self.assertRaisesRegex(ValidationError, "cloudinit_snippet_storage"):
+            validate_inventory(self.data)
 
     def test_shared_template_allows_independent_guest_vlan_only(self):
         other = self.data["_meta"]["hostvars"]["fedora"]
         other.update(
-            profile=self.host["profile"], template_vmid=self.host["template_vmid"], vlan=25
+            profile=self.host["profile"],
+            template_vmid=self.host["template_vmid"],
+            vlan=25,
+            cloudinit_snippet_storage="local",
         )
         self.assertEqual(validate_inventory(self.data), 4)
         self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
@@ -48,6 +69,7 @@ class TestValidation(unittest.TestCase):
         other.update(
             profile=self.host["profile"],
             template_vmid=self.host["template_vmid"],
+            cloudinit_snippet_storage="local",
             cpu="x86-64-v3",
             bridge="vmbr2",
             storage="other-pool",

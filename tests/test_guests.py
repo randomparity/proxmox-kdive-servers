@@ -140,6 +140,7 @@ class TestGuestHost(unittest.TestCase):
             self.assertEqual(guest_host.desired_config(self.request), expected)
 
     def test_disabled_balloon_preserves_legacy_identity(self):
+        self.host.pop("cloudinit_snippet_storage")
         self.host["balloon_mib"] = 0
         expected = guest_host.template_host.digest(
             {
@@ -153,6 +154,24 @@ class TestGuestHost(unittest.TestCase):
         self.assertEqual(guest_host.identity(self.request), expected)
         self.host.pop("balloon_mib")
         self.assertNotEqual(guest_host.identity(self.request), expected)
+
+    def test_snippet_storage_binds_only_ubuntu_identity(self):
+        with_seed = guest_host.identity(self.request)
+        legacy = copy.deepcopy(self.request)
+        legacy["host"].pop("cloudinit_snippet_storage")
+        expected = guest_host.template_host.digest(
+            {
+                "schema": 1,
+                "management": 1,
+                "template": guest_host.template_host.identity(self.request["template"]),
+                "guest": {k: self.host[k] for k in guest_host.BASELINE_FIELDS}
+                | {"vlan": self.host.get("vlan"), "balloon_mib": self.host["memory_mib"]},
+            }
+        )
+        self.assertEqual(guest_host.identity(legacy), expected)
+        self.assertNotEqual(with_seed, expected)
+        legacy["host"]["cloudinit_snippet_storage"] = "other"
+        self.assertNotIn(guest_host.identity(legacy), {with_seed, expected})
 
     def test_acknowledgement_cannot_mark_another_guest_ready(self):
         expected = {
@@ -184,8 +203,11 @@ class TestGuestHost(unittest.TestCase):
             efidisk0="pool:vm-1101-disk-1,efitype=4m,pre-enrolled-keys=1,size=4M",
         )
         config["ipconfig0"] = ",".join(reversed(config["ipconfig0"].split(",")))
+        config["cicustom"] = "network=" + guest_host.seed_volume(self.request, config)[0]
         guest_host.check_configuration(self.request, config, [], "ready")
         for key, value in [
+            ("cicustom", "network=local:snippets/other.yaml"),
+            ("cicustom", config["cicustom"] + ",user=local:snippets/user.yaml"),
             ("onboot", 1),
             ("memory", 2),
             ("ide2", "foreign:disk"),
@@ -201,6 +223,53 @@ class TestGuestHost(unittest.TestCase):
             guest_host.check_configuration(
                 self.request, config, [{"key": "cores", "pending": 3}], "ready"
             )
+
+    def test_missing_seed_reference_is_drift(self):
+        config = guest_host.desired_config(self.request)
+        config.update(net0="virtio=02:11:22:33:44:55,bridge=vmbr0")
+        for phase in ("preparing", "ready"):
+            config["description"] = guest_host.marker(self.request, phase)
+            with (
+                self.subTest(phase=phase),
+                self.assertRaisesRegex(guest_host.GuestError, "seed reference"),
+            ):
+                guest_host.check_configuration(self.request, config, [], phase)
+
+    def test_network_seed_matches_mac_without_rename(self):
+        seed = guest_host.network_seed(self.request, "BC:24:11:00:00:01")
+        expected = (
+            f"# kdive-guest-network-v1 identity={guest_host.identity(self.request)}\n"
+            "version: 2\n"
+            "ethernets:\n"
+            "  kdive0:\n"
+            "    match:\n"
+            '      macaddress: "bc:24:11:00:00:01"\n'
+            "    dhcp4: false\n"
+            '    addresses: ["192.0.2.11/24"]\n'
+            "    routes:\n"
+            "      - to: default\n"
+            '        via: "192.0.2.1"\n'
+            "    nameservers:\n"
+            '      addresses: ["192.0.2.53"]\n'
+            '      search: ["example.invalid"]\n'
+        )
+        self.assertEqual(seed, expected.encode())
+        self.assertNotIn(b"set-name", seed)
+        volume, name, content = guest_host.seed_volume(
+            self.request, {"net0": "virtio=BC:24:11:00:00:01,bridge=vmbr0"}
+        )
+        self.assertEqual(content, seed)
+        self.assertEqual(name, f"kdive-net-1101-{guest_host.hashlib.sha256(seed).hexdigest()}.yaml")
+        self.assertEqual(volume, "local:snippets/" + name)
+        other = guest_host.seed_volume(
+            self.request, {"net0": "virtio=BC:24:11:00:00:02,bridge=vmbr0"}
+        )
+        self.assertNotEqual(other[1], name)
+
+    def test_network_seed_canonicalizes_address(self):
+        self.host["ipv4_cidr"] = "192.0.2.11/255.255.255.0"
+        seed = guest_host.network_seed(self.request, "02:11:22:33:44:55")
+        self.assertIn(b'addresses: ["192.0.2.11/24"]', seed)
 
 
 class TestGuestVerifier(unittest.TestCase):
@@ -253,7 +322,9 @@ class TestGuestVerifier(unittest.TestCase):
             with self.subTest(wrong=wrong), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 files = {
-                    "/etc/os-release": 'ID=ubuntu\nVERSION_ID="24.04"\n',
+                    "/etc/os-release": (
+                        f'ID=ubuntu\nVERSION_ID="{req["template"]["image"]["release"]}"\n'
+                    ),
                     "/proc/cpuinfo": "flags : vmx",
                     "/proc/meminfo": "MemTotal: 4194304 kB\n",
                     "/sys/module/apparmor/parameters/enabled": "Y",
@@ -427,7 +498,7 @@ class TestGuestVerifier(unittest.TestCase):
             "guest_uuid": req["guest_uuid"].upper(),
             "boot_id": "12345678-1234-1234-1234-123456789abd",
             "os_id": "ubuntu",
-            "release": "24.04",
+            "release": req["template"]["image"]["release"],
             "architecture": "x86_64",
             "hostname": "ubuntu",
             "fqdn": req["host"]["fqdn"],
@@ -509,6 +580,55 @@ class TestGuestVerifier(unittest.TestCase):
                 req,
                 {key: value for key, value in observed.items() if key != "crash_reserved_bytes"},
             )
+
+    def test_crash_reservation_cap_is_one_gib_for_ubuntu_only(self):
+        req = request()
+        req["guest_uuid"] = "12345678-1234-1234-1234-123456789abc"
+        req["host"].pop("balloon_mib", None)
+        observed = {
+            "guest_uuid": req["guest_uuid"],
+            "boot_id": "12345678-1234-1234-1234-123456789abd",
+            "os_id": "ubuntu",
+            "release": req["template"]["image"]["release"],
+            "architecture": "x86_64",
+            "hostname": "ubuntu",
+            "fqdn": req["host"]["fqdn"],
+            "ipv4": [req["host"]["ansible_host"]],
+            "cpus": 2,
+            "balloon_driver": True,
+            "filesystem_bytes": 31 * 1024**3,
+            "security": "apparmor-enforcing",
+            "kvm_api": 12,
+            "kvm_create_vm": True,
+        }
+
+        def check(memory_mib, usable, reserved):
+            req["host"]["memory_mib"] = memory_mib
+            guest_verify.validate_observation(
+                req, dict(observed, memory_bytes=usable, crash_reserved_bytes=reserved)
+            )
+
+        # Ubuntu kdump-tools reserves 1 GiB in its 32G-64G range.
+        check(32768, 31805460 * 1024, 1024**3)
+        for memory_mib, usable, reserved in (
+            (32768, 31 * 1024**3 - 1, 1024**3 + 1),
+            (2048, 1536 * 1024**2 - 1, 512 * 1024**2 + 1),
+        ):
+            with (
+                self.subTest(memory_mib=memory_mib, reserved=reserved),
+                self.assertRaisesRegex(guest_verify.GuestError, "memory evidence invalid"),
+            ):
+                check(memory_mib, usable, reserved)
+        req["host"]["profile"] = "fedora"
+        observed.update(os_id="fedora", hostname="ubuntu", security="selinux-enforcing")
+        req["template"]["image"]["release"] = observed["release"]
+        check(32768, 31 * 1024**3 + 512 * 1024**2, 512 * 1024**2)
+        for reserved in (512 * 1024**2 + 1, 1024**3):
+            with (
+                self.subTest(profile="fedora", reserved=reserved),
+                self.assertRaisesRegex(guest_verify.GuestError, "memory evidence invalid"),
+            ):
+                check(32768, 31 * 1024**3, reserved)
 
     def test_crash_reservation_uses_native_sysfs_bytes(self):
         for native, expected in (("0\n", 0), ("268435456\n", 268435456)):
@@ -917,9 +1037,33 @@ class GuestNativeFixture:
         self.destination_extent = 0
         self.snapshots = {}
         self.disk_state = {}
+        self.snippets = None
+        self.nodes = None
+        self.snippet_status = {"active": 1, "enabled": 1, "type": "dir", "content": "iso,snippets"}
 
     def __call__(self, argv, **kwargs):
+        result = self.run(argv, **kwargs)
+        if self.nodes is not None:
+            self.sync_configuration_files()
+        return result
+
+    def sync_configuration_files(self):
+        """Mirror native configuration files: current, pending and snapshot sections."""
+        directory = self.nodes / self.template.node / "qemu-server"
+        directory.mkdir(parents=True, exist_ok=True)
+        for path in directory.glob("*.conf"):
+            path.unlink()
+        configs = {9001: {"config": self.template.config}} if self.template.config else {}
+        configs |= self.guests
+        for vmid, guest in configs.items():
+            sections = [guest["config"], guest.get("pending", [])]
+            sections += [snap["config"] for snap in self.snapshots.get(vmid, {}).values()]
+            (directory / f"{vmid}.conf").write_text(json.dumps(sections))
+
+    def run(self, argv, **kwargs):
         self.calls.append(argv)
+        if argv[:2] == ["pvesm", "path"]:
+            return str(self.snippets / argv[2].rsplit("/", 1)[1]) + "\n"
         if argv[:2] in (
             ["qm", "snapshot"],
             ["qm", "rollback"],
@@ -1054,6 +1198,9 @@ class GuestNativeFixture:
             return json.dumps(self.template.volumes + self.volumes)
         if path == f"/nodes/{self.template.node}/status":
             return json.dumps({"cpuinfo": {"cpus": 24}, "cpu": 0, "loadavg": ["1"]})
+        storage = self.request["host"].get("cloudinit_snippet_storage")
+        if storage and path == f"/nodes/{self.template.node}/storage/{storage}/status":
+            return json.dumps(self.snippet_status)
         for vmid, guest in self.guests.items():
             prefix = f"/nodes/{self.template.node}/qemu/{vmid}/"
             if path.startswith(prefix):
@@ -1106,6 +1253,10 @@ class TestNativeLifecycle(unittest.TestCase):
         self.stack.enter_context(patch.object(guest_verify, "kvm_probe", return_value=12))
         self.temp = self.stack.enter_context(tempfile.TemporaryDirectory())
         self.stack.enter_context(patch.object(t, "LOCKS", Path(self.temp) / "locks"))
+        self.fixture.snippets = Path(self.temp) / "snippets"
+        self.fixture.snippets.mkdir(mode=0o755)
+        self.fixture.nodes = Path(self.temp) / "nodes"
+        self.stack.enter_context(patch.object(guest_host, "PVE_NODES", self.fixture.nodes))
         original_read = Path.read_text
         self.stack.enter_context(
             patch.object(

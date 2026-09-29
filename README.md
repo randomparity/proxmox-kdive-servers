@@ -155,6 +155,7 @@ Other groups may coexist, but these checks only validate managed `kdive` hosts.
 | `vlan` | Optional integer 1–4094; guest NIC tag; omit for an untagged guest |
 | `nic_model`, `nic_queues` | NIC model (default `virtio`); optional integer 0–64 queues, only for virtio |
 | `balloon_mib` | Balloon target in MiB, default `memory_mib`; 0 disables, otherwise at most `memory_mib` |
+| `cloudinit_snippet_storage` | Required for `ubuntu` guests only, rejected for other profiles: an operator-enabled snippet storage |
 | `template_vmid`, `cpu` | Explicit template ID 100–999999999 and guest CPU model name; `host` is the default example |
 | `proxmox_ssh_host`, `proxmox_ssh_user`, `proxmox_ssh_port` | Native host SSH endpoint, root-capable login, port default 22 |
 | `proxmox_ssh_private_key_file` | Optional private-key path; blank/omitted uses normal SSH identities |
@@ -312,13 +313,30 @@ removes VMs or volumes; native `qm create` may roll back its own fresh allocatio
 API/SSH/native failures never establish resource absence.
 
 The source image digest identifies the unchanged package baseline. Inspection used
-read-only libguestfs 1.54.1 to verify OS/architecture, EFI fallback boot files, cloud-init
+read-only libguestfs (version recorded per image) to verify OS/architecture, EFI fallback boot files, cloud-init
 NoCloud modules/effective configuration and package tuples. `packages_sha256` hashes
 compact, sorted-key UTF-8 JSON of package objects with `name`, `epoch`, `version`,
 `release`, `arch`, sorted by that tuple. Missing tuple values are empty strings.
 Management package versions and absences are recorded separately. In particular,
 the Ubuntu source lacks `qemu-guest-agent`; downstream preparation owns installing it.
 No security enforcement or package state is changed to manufacture import success.
+
+Ubuntu uses the Ubuntu 26.04 release-20260918 image, with its native Python 3.14 package
+family. Changing from the previous Ubuntu 24.04 pin changes template and guest identities;
+use separately assigned replacement resources and rebuild the snapshot chain. Existing
+captures do not become compatible by editing their metadata.
+
+Ubuntu 26.04's cloud-init refuses to rename an already active interface, and the network
+config Proxmox generates always renames it. Ubuntu guests therefore take their network
+config from a product-written snippet that matches the cloned NIC by MAC and never renames
+it; user, keys and hostname remain native. Before provisioning Ubuntu, the operator enables
+`snippets` content on an active directory storage (for example
+`pvesm set local --content <existing>,snippets`) whose `snippets/` directory exists, is owned
+by root and is not group- or world-writable; the tools never change storage configuration.
+Name that storage in `cloudinit_snippet_storage`. Inventory validation covers every managed
+host, so an inventory holding an Ubuntu host must add the field before any guest operation.
+The field changes Ubuntu guest identities; Ubuntu guests provisioned without it are no longer
+managed by these tools, while other profiles' identities are unchanged.
 
 Import/rerun proof establishes template identity and storage eligibility. Guest
 provisioning below establishes boot, networking, cloud-init and nested KVM.
@@ -400,6 +418,13 @@ seed with a generated `scsi1` seed on its VirtIO SCSI controller. Native removal
 frees the old seed volume; creation regenerates it from inventory. Root and EFI
 volumes, VM UUID and source templates are preserved and checked. Failure leaves
 an inspectable partial; reruns do not resume or repair it.
+Ubuntu clones first receive an immutable network seed `kdive-net-<vmid>-<sha256>.yaml` in
+the snippet storage, referenced as `cicustom: network=<storage>:snippets/<name>`. Its name is
+the SHA-256 of its bytes, and the bytes carry the guest identity, so the file is never
+rewritten; an existing file is reused only when byte-identical, root owned, singly linked
+and not group- or world-writable. Provisioning, verify, level preparation, restore and every
+start re-derive the seed from the NIC MAC and inventory and require the exact reference and
+bytes; a missing or changed seed stops before start for operator inspection.
 Only fresh clones receive management preparation: the pinned Ubuntu image needs
 `qemu-guest-agent`; the other three already contain it. Existing SSH/sudo/Python/
 cloud-init are checked. The installed guest KVM vendor module is loaded and named
@@ -434,7 +459,8 @@ RAM evidence reports usable `memory_bytes` and measured `crash_reserved_bytes`
 separately. Allocation proof requires their sum to be at least 90% of configured
 RAM (or the positive balloon target), without changing the image's crash-kernel
 settings. Only the native sysfs reservation counts, capped at 512 MiB and one quarter of configured RAM; their
-sum cannot exceed maximum configured RAM. Missing crash-reservation support counts as
+sum cannot exceed maximum configured RAM. Ubuntu guests allow up to 1 GiB (still at most one
+quarter of RAM) because the Ubuntu kdump tools installed by KDIVE reserve 1 GiB from 32 GiB. Missing crash-reservation support counts as
 zero; malformed or unreadable evidence fails.
 
 Matching ready reruns perform verification only: they do not restart a stopped
@@ -509,6 +535,11 @@ preserves shared templates and unselected VMs. It accepts a complete matching ol
 without `clean`, enabling intentional replacement; absent selected guests are an unchanged result.
 Foreign ownership, changed configuration, unknown disks or snapshot references, incomplete
 allocations and native task locks require inspection instead of broader deletion.
+Ubuntu teardown checks the seed reference but not its bytes. After the VM is gone it deletes
+the seed only when every VM and container configuration in the cluster (current, pending and
+snapshot sections) reads cleanly and none names it; otherwise the file is retained and the
+command fails after removal so the operator can inspect it. A rerun reports the guest absent
+and does not revisit the retained file.
 
 ```sh
 make teardown
@@ -595,7 +626,9 @@ operator to `docker`, `kvm` and `libvirt`, and makes operator-owned `~/src` and 
 from group/other writes. It refuses symlinks, foreign ownership and unsafe system ancestors.
 Docker membership grants broad guest privileges. Security enforcement stays enabled.
 Operator login checks exercise GNU tools, Bash >=4.4, native build tools, headers, QEMU,
-Docker/Compose and system libvirt, including operator Docker access.
+Docker/Compose and system libvirt, including operator Docker access. `realpath` may also be
+uutils coreutils, which Ubuntu 26.04 installs by default; `find` and `grep` must be GNU, and
+any other `realpath` provider fails preparation and verification.
 
 The operator gets pinned `uv 0.12.19` from Astral and `rust-just 1.58.0` from PyPI with
 `~/.local/bin` on the login PATH. The manifest records distro/release, critical tool versions,
@@ -715,8 +748,8 @@ these prepared trees and guest writes, not a capacity guarantee.
 The checkout lives at the operator's `~/src/kdive`; mismatching or dirty existing trees are
 preserved and refused. Preparation delegates `just setup` and the upstream local-libvirt
 host play. It requires installed Python 3.14; the upstream play must provide its native
-`guestfs` binding. Ubuntu 24.04 currently lacks that interpreter; the approved first proof
-uses Fedora 44, with Ubuntu proof deferred to the template owner. openSUSE is excluded;
+`guestfs` binding. Ubuntu 26.04 and Fedora 44 have completed proofs.
+openSUSE is excluded;
 Rocky has a verified toolchain snapshot; its kernel-source and KDIVE preparation remain unverified.
 
 ```sh
@@ -790,3 +823,19 @@ allocation above `kernel-src` was 6,853.27 MiB written and 6,125.94 MiB addition
 data. These measurements include the explicitly preserved setup attempts and are not a
 minimal clean-install size. The corrected final verifier was proven against that installation;
 the entire fresh-install command was not replayed after the query-only correction.
+
+Ubuntu 26.04 native proof on 2026-09-29 used KDIVE commit
+`8182457399c25f1fd180806a10a0014d1877ed2b` on a fresh replacement guest provisioned with the
+MAC-matched network seed. The operator captured `clean`, `toolchain`, `kernel-src` and
+`kdive` without RAM after each READY; each level was verified and restored. The installed
+lifecycle interpreters (the lifecycle service virtual environment and the KDIVE project
+environment, both Python 3.14.4) import the native `guestfs` binding from Ubuntu's
+`python3-guestfs`. After `kdive` restore, exactly one HTTP authorization test passed with zero
+skips under strict stack revision checking; its only warning reported the Kubernetes-only
+lifecycle witness as not deployed. No setup or Ansible step ran after restore. The stack
+stopped with no containers or workers left, final verification passed and the guest stopped.
+
+Restore took 95.071 seconds; the test started 39.316 seconds after restore completed, or
+134.387 seconds after restore began (guest clock test-start marker). Native ZFS allocation
+above `kernel-src` was 9,245.50 MiB written and 9,152.84 MiB additional referenced data for
+a single clean installation.

@@ -1,31 +1,31 @@
 {
   "ubuntu": {
-    "release": "24.04",
-    "build": "20260911",
-    "url": "https://cloud-images.ubuntu.com/releases/noble/release-20260911/ubuntu-24.04-server-cloudimg-amd64.img",
-    "checksum_url": "https://cloud-images.ubuntu.com/releases/noble/release-20260911/SHA256SUMS",
-    "sha256": "612b2c0cc1bc413a6cb8c38fd611794caf0f2b436c50013d8b3794db12ad7354",
-    "size_bytes": 625256960,
+    "release": "26.04",
+    "build": "20260918",
+    "url": "https://cloud-images.ubuntu.com/releases/resolute/release-20260918/ubuntu-26.04-server-cloudimg-amd64.img",
+    "checksum_url": "https://cloud-images.ubuntu.com/releases/resolute/release-20260918/SHA256SUMS",
+    "sha256": "4908fb59ccd4e87ae4e8e973b7ef56f535448eacb24a87fd787270c0048987bc",
+    "size_bytes": 864411136,
     "virtual_size_bytes": 3758096384,
     "bios": "ovmf",
     "baseline": {
       "customization": "none",
       "architecture": "x86_64",
-      "product": "Ubuntu 24.04.5 LTS",
+      "product": "Ubuntu 26.04.1 LTS",
       "package_format": "deb",
-      "package_count": 664,
-      "packages_sha256": "8530632f70921dd9446eee6960f2a498a91fd0303a7dd6604b6f5fddd1ee0313",
+      "package_count": 678,
+      "packages_sha256": "78681aac7ada15fa8bb931a190c42aa569cf057f94e287c7ffb3bee8a098ec4b",
       "management_packages": {
-        "apparmor": "4.0.1really4.0.1-0ubuntu0.24.04.7",
-        "cloud-init": "26.1-0ubuntu1~24.04.1",
-        "openssh-server": "1:9.6p1-3ubuntu13.19",
-        "python3": "3.12.3-0ubuntu2.1",
-        "sudo": "1.9.15p5-3ubuntu5.24.04.2",
+        "apparmor": "5.0.2-0ubuntu1~26.04.1",
+        "cloud-init": "26.1-0ubuntu3~26.04.1",
+        "openssh-server": "1:10.2p1-2ubuntu3.6",
+        "python3": "3.14.3-0ubuntu2",
+        "sudo": "1.9.17p2-1ubuntu3",
         "qemu-guest-agent": null
       },
       "nocloud": true,
       "efi_boot_file": "/EFI/BOOT/BOOTX64.EFI",
-      "inspection": "libguestfs 1.54.1; read-only source image; 2026-09-27"
+      "inspection": "libguestfs 1.60.1; read-only source image; 2026-09-28"
     }
   },
   "fedora": {

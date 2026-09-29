@@ -1,11 +1,15 @@
 """Owned native guest lifecycle, held through controller-confirmed readiness."""
 
 import contextlib
+import hashlib
+import ipaddress
 import json
 import math
 import os
 import re
+import secrets
 import select
+import stat
 import sys
 import tempfile
 import time
@@ -24,6 +28,7 @@ GuestError = template_host.TemplateError
 check = template_host.check
 native = template_host.native
 command = template_host.command
+PVE_NODES = Path("/etc/pve/nodes")
 BASELINE_FIELDS = (
     "vmid",
     "fqdn",
@@ -45,6 +50,8 @@ def identity(request):
         overrides["nic_model"] = h["nic_model"]
     if "nic_queues" in h:
         overrides["nic_queues"] = h["nic_queues"]
+    if "cloudinit_snippet_storage" in h:
+        overrides["cloudinit_snippet_storage"] = h["cloudinit_snippet_storage"]
     balloon = h.get("balloon_mib", h["memory_mib"])
     if balloon:
         overrides["balloon_mib"] = balloon
@@ -212,8 +219,7 @@ def desired_config(request):
     }
 
 
-def desired_network(request, config):
-    h = request["host"]
+def cloned_mac(config):
     net = template_host.properties(config.get("net0"))
     models = set(net) & NIC_MODELS
     check(len(models) == 1, "Missing cloned NIC model; inspect retained guest")
@@ -222,12 +228,166 @@ def desired_network(request, config):
         isinstance(mac, str) and re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", mac),
         "Missing cloned NIC identity; inspect retained guest",
     )
+    return mac
+
+
+def desired_network(request, config):
+    h = request["host"]
+    mac = cloned_mac(config)
     value = f"{h.get('nic_model', 'virtio')}={mac},bridge={h['bridge']}"
     if "vlan" in h:
         value += f",tag={h['vlan']}"
     if "nic_queues" in h:
         value += f",queues={h['nic_queues']}"
     return value
+
+
+def network_seed(request, mac):
+    """Network-only cloud-init v2 document matched by MAC, never renaming the interface."""
+    h = request["host"]
+    lines = [
+        f"# kdive-guest-network-v1 identity={identity(request)}",
+        "version: 2",
+        "ethernets:",
+        "  kdive0:",
+        "    match:",
+        f'      macaddress: "{mac.lower()}"',
+        "    dhcp4: false",
+        f'    addresses: ["{ipaddress.IPv4Interface(h["ipv4_cidr"])}"]',
+        "    routes:",
+        "      - to: default",
+        f'        via: "{h["gateway"]}"',
+        "    nameservers:",
+        "      addresses: [" + ", ".join(f'"{a}"' for a in h["dns_servers"]) + "]",
+        f'      search: ["{h["fqdn"].split(".", 1)[1]}"]',
+    ]
+    return ("\n".join(lines) + "\n").encode()
+
+
+def seed_volume(request, config):
+    h = request["host"]
+    content = network_seed(request, cloned_mac(config))
+    name = f"kdive-net-{h['vmid']}-{hashlib.sha256(content).hexdigest()}.yaml"
+    return f"{h['cloudinit_snippet_storage']}:snippets/{name}", name, content
+
+
+def seed_path(volume):
+    path = Path(command(["pvesm", "path", volume]).strip())
+    check(
+        path.is_absolute() and path.name == volume.rsplit("/", 1)[1],
+        "Invalid snippet storage path; inspect native storage",
+    )
+    return path
+
+
+@contextlib.contextmanager
+def seed_directory(path):
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        check(
+            stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o022,
+            "Unsafe snippet directory; inspect ownership/mode",
+        )
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def read_seed(fd, name):
+    try:
+        file = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(file, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        check(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.getuid()
+            and info.st_nlink == 1
+            and not info.st_mode & 0o022,
+            "Unsafe network seed file; inspect before retry",
+        )
+        return stream.read(65537)
+
+
+def write_seed(request, config):
+    volume, name, content = seed_volume(request, config)
+    with seed_directory(seed_path(volume)) as fd:
+        existing = read_seed(fd, name)
+        if existing is None:
+            # Publish complete bytes under the final name without ever replacing a file.
+            temporary = f".{name}.{secrets.token_hex(8)}.tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+            file = os.open(temporary, flags, 0o600, dir_fd=fd)
+            try:
+                with os.fdopen(file, "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                with contextlib.suppress(FileExistsError):
+                    os.link(temporary, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            finally:
+                os.unlink(temporary, dir_fd=fd)
+            os.fsync(fd)
+            existing = read_seed(fd, name)
+        check(
+            existing == content, "Network seed differs from derived content; inspect before retry"
+        )
+    return volume
+
+
+def verify_seed(request, config):
+    volume, name, content = seed_volume(request, config)
+    with seed_directory(seed_path(volume)) as fd:
+        data = read_seed(fd, name)
+    check(data is not None, "Network seed missing; inspect before retry")
+    check(data == content, "Network seed differs from derived content; inspect before retry")
+
+
+def seed_storage_admission(h):
+    storage = h["cloudinit_snippet_storage"]
+    status = native(f"/nodes/{h['proxmox_node']}/storage/{storage}/status")
+    check(
+        isinstance(status, dict)
+        and status.get("active") == 1
+        and status.get("enabled") == 1
+        and "snippets" in str(status.get("content", "")).split(","),
+        "Snippet storage must be active, enabled and snippet-capable",
+    )
+    with seed_directory(seed_path(f"{storage}:snippets/kdive-net-probe.yaml")):
+        pass
+
+
+def seed_references(request, name):
+    h = request["host"]
+    try:
+        files = sorted(PVE_NODES.glob("*/qemu-server/*.conf"))
+        files += sorted(PVE_NODES.glob("*/lxc/*.conf"))
+        check(
+            PVE_NODES / h["proxmox_node"] / "qemu-server" / f"{h['template_vmid']}.conf" in files,
+            "Guest removed; network seed retained because the reference inventory is incomplete",
+        )
+        return any(name in path.read_text() for path in files)
+    except (OSError, UnicodeError):
+        raise GuestError(
+            "Guest removed; network seed retained because the reference inventory is unreadable"
+        ) from None
+
+
+def release_seed(request, seed):
+    volume, name, content = seed
+    with seed_directory(seed_path(volume)) as fd:
+        data = read_seed(fd, name)
+        if data is None:
+            return
+        check(data == content, "Guest removed; network seed retained because it changed; inspect")
+        check(
+            not seed_references(request, name),
+            "Guest removed; network seed retained because references remain; inspect",
+        )
+        os.unlink(name, dir_fd=fd)
+        os.fsync(fd)
 
 
 def check_configuration(request, config, pending, phase):
@@ -258,6 +418,12 @@ def check_configuration(request, config, pending, phase):
         "vmgenid",
         "parent",
     }
+    if "cloudinit_snippet_storage" in request["host"]:
+        allowed.add("cicustom")
+        check(
+            config.get("cicustom") == "network=" + seed_volume(request, config)[0],
+            "Guest network seed reference differs; inspect drift before retry",
+        )
     check(set(config) <= allowed, "Unexpected guest configuration or disks; inspect drift")
     for key, value in expected.items():
         actual = str(config.get(key, "1000" if key == "shares" else None))
@@ -275,7 +441,7 @@ def check_configuration(request, config, pending, phase):
     )
 
 
-def inspect_guest(request, phase="ready", running=True, seed_pending=False):
+def inspect_guest(request, phase="ready", running=True, seed_pending=False, seed=True):
     path = base_path(request)
     config = native(path + "/config")
     check(isinstance(config, dict), "Invalid native guest configuration")
@@ -290,6 +456,8 @@ def inspect_guest(request, phase="ready", running=True, seed_pending=False):
         checked = {key: value for key, value in config.items() if key != "ide2"}
         checked["scsi1"] = config["ide2"]
     check_configuration(request, checked, native(path + "/pending"), phase)
+    if seed and "cloudinit_snippet_storage" in request["host"]:
+        verify_seed(request, checked)
     status = native(path + "/status/current")
     check(
         isinstance(status, dict)
@@ -347,6 +515,8 @@ def admission(requests, mode="apply", level="clean"):
         marker_value = "kdive-template-v1:" + template_host.identity(t) + ":ready"
         config = template_host.verify_configuration(t, marker_value, source_storage["extent_bytes"])
         check(config.get("template") == 1, "Selected source is not a ready template")
+        if "cloudinit_snippet_storage" in h and mode not in {"teardown", "plan-teardown"}:
+            seed_storage_admission(h)
     if mode in {"teardown", "plan-teardown"}:
         resources = native("/cluster/resources", "--type", "vm")
         existing = [resource_present(r, resources) for r in requests]
@@ -435,6 +605,8 @@ def clone(request):
     )
     options = desired_config(request)
     options["net0"] = desired_network(request, config)
+    if "cloudinit_snippet_storage" in h:
+        options["cicustom"] = "network=" + write_seed(request, config)
     with tempfile.NamedTemporaryFile(mode="w", prefix="kdive-guest-keys-") as keys:
         keys.write(options.pop("sshkeys"))
         keys.flush()
@@ -795,7 +967,7 @@ def level_exchange(request, config, level, prepare=False):
     return metadata
 
 
-def shutdown_guest(request, config, phase="ready"):
+def shutdown_guest(request, config, phase="ready", seed=True):
     status = native(base_path(request) + "/status/current")
     check(
         isinstance(status, dict) and status.get("status") in {"running", "stopped"},
@@ -814,7 +986,7 @@ def shutdown_guest(request, config, phase="ready"):
             ],
             timeout=210,
         )
-    stopped = inspect_guest(request, phase=phase, running=False)
+    stopped = inspect_guest(request, phase=phase, running=False, seed=seed)
     check(normalized_config(stopped) == normalized_config(config), "Guest changed during shutdown")
     return stopped
 
@@ -870,7 +1042,7 @@ def inspect_removable(request):
         (p for p in ("ready", "preparing") if config.get("description") == marker(request, p)), None
     )
     check(phase is not None, "Selected guest ownership differs; teardown refused")
-    config = inspect_guest(request, phase=phase, running=None)
+    config = inspect_guest(request, phase=phase, running=None, seed=False)
     for name in snapshot_rows(request):
         snapshot = native(base_path(request) + "/snapshot/" + name + "/config")
         normalized = normalized_config(snapshot, snapshot=True)
@@ -894,8 +1066,9 @@ def lifecycle(request, mode, level="clean"):
         command(["qm", "start", vmid], timeout=180)
         return verify_readiness(request, fresh=False)
     config, phase = inspect_removable(request)
+    seed = seed_volume(request, config) if "cloudinit_snippet_storage" in request["host"] else None
     volumes = {config[slot].split(",", 1)[0] for slot in ("scsi0", "scsi1", "efidisk0")}
-    shutdown_guest(request, config, phase)
+    shutdown_guest(request, config, phase, seed=False)
     inspect_removable(request)
     command(
         ["qm", "destroy", vmid, "--purge", "0", "--destroy-unreferenced-disks", "0"], timeout=1800
@@ -915,6 +1088,15 @@ def lifecycle(request, mode, level="clean"):
         ),
         "Owned volumes remain after teardown; inspect without broad cleanup",
     )
+    if seed:
+        try:
+            release_seed(request, seed)
+        except (GuestError, OSError) as error:
+            if str(error).startswith("Guest removed"):
+                raise
+            raise GuestError(
+                "Guest removed; network seed retained; inspect the snippet storage"
+            ) from None
     return None
 
 

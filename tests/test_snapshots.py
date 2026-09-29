@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -96,10 +97,233 @@ class TestSnapshots(unittest.TestCase):
                     self.execute("restore", confirmed=True, exclusive=True)
                 self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
 
+    def seed_file(self):
+        config = self.fixture.guests[1101]["config"]
+        name = config["cicustom"].rsplit("/", 1)[1]
+        return self.fixture.snippets / name
+
+    def test_clone_writes_owned_network_seed(self):
+        self.execute("apply")
+        config = self.fixture.guests[1101]["config"]
+        volume, name, content = guest_host.seed_volume(self.req, config)
+        self.assertEqual(config["cicustom"], "network=" + volume)
+        path = self.fixture.snippets / name
+        info = path.lstat()
+        self.assertEqual((info.st_mode & 0o777, info.st_nlink), (0o600, 1))
+        self.assertEqual(path.read_bytes(), content)
+        self.assertEqual(sorted(p.name for p in self.fixture.snippets.iterdir()), [name])
+        calls = self.fixture.calls
+        path_call = calls.index(["pvesm", "path", volume])
+        first_set = next(i for i, c in enumerate(calls) if c[:2] == ["qm", "set"])
+        self.assertLess(path_call, first_set)
+        self.assertIn("--cicustom", calls[first_set])
+        for snapshot in self.fixture.snapshots[1101].values():
+            self.assertEqual(snapshot["config"]["cicustom"], config["cicustom"])
+
+    def test_existing_seed_is_reused_only_when_identical_and_safe(self):
+        self.execute("apply")
+        path = self.seed_file()
+        content = path.read_bytes()
+        self.execute("teardown", confirmed=True, exclusive=True)
+        self.assertFalse(path.exists())
+        path.write_bytes(content)
+        path.chmod(0o600)
+        self.assertEqual(self.execute("apply")[-1]["action"], "created")
+        self.assertEqual(path.read_bytes(), content)
+        self.execute("teardown", confirmed=True, exclusive=True)
+        for fault in ("bytes", "symlink", "hardlink", "writable"):
+            with self.subTest(fault=fault):
+                for item in self.fixture.snippets.iterdir():
+                    item.unlink()
+                if fault == "symlink":
+                    target = self.fixture.snippets / "target"
+                    target.write_bytes(content)
+                    path.symlink_to(target)
+                else:
+                    path.write_bytes(b"other" if fault == "bytes" else content)
+                    path.chmod(0o622 if fault == "writable" else 0o600)
+                    if fault == "hardlink":
+                        os.link(path, self.fixture.snippets / "second")
+                self.fixture.calls.clear()
+                with self.assertRaises((guest_host.GuestError, OSError)):
+                    self.execute("apply")
+                self.assertFalse(any(c[:2] == ["qm", "set"] for c in self.fixture.calls))
+                self.assertTrue(path.is_symlink() or path.read_bytes() in {content, b"other"})
+                del self.fixture.guests[1101]
+                self.fixture.volumes = [v for v in self.fixture.volumes if v["vmid"] != 1101]
+
+    def test_seed_drift_stops_verify_restore_and_start(self):
+        self.execute("apply")
+        path = self.seed_file()
+        content = path.read_bytes()
+        for fault in ("missing", "bytes", "reference"):
+            with self.subTest(fault=fault):
+                config = self.fixture.guests[1101]["config"]
+                reference = config["cicustom"]
+                if fault == "missing":
+                    path.unlink()
+                elif fault == "bytes":
+                    path.write_bytes(content + b"# changed\n")
+                else:
+                    config["cicustom"] = reference.replace("kdive-net", "kdive-other")
+                for mode, kwargs in (
+                    ("verify", {}),
+                    ("restore", {"confirmed": True, "exclusive": True}),
+                ):
+                    self.fixture.calls.clear()
+                    with self.assertRaises(guest_host.GuestError):
+                        self.execute(mode, **kwargs)
+                    self.assertFalse(
+                        any(
+                            c[:2] in (["qm", "start"], ["qm", "rollback"])
+                            for c in self.fixture.calls
+                        )
+                    )
+                path.unlink(missing_ok=True)
+                path.write_bytes(content)
+                path.chmod(0o600)
+                config["cicustom"] = reference
+                self.assertEqual(self.execute("verify")[-1]["action"], "preserved")
+
+    def test_rollback_seed_drift_stops_before_start(self):
+        self.execute("apply")
+        path = self.seed_file()
+        original = guest_host.command
+
+        def rollback_then_drift(argv, **kwargs):
+            result = original(argv, **kwargs)
+            if argv[:2] == ["qm", "rollback"]:
+                path.write_bytes(b"changed")
+            return result
+
+        with patch.object(guest_host, "command", side_effect=rollback_then_drift):
+            self.fixture.calls.clear()
+            with self.assertRaisesRegex(guest_host.GuestError, "Network seed"):
+                self.execute("restore", confirmed=True, exclusive=True)
+        self.assertIn(["qm", "rollback", "1101", "clean", "--start", "0"], self.fixture.calls)
+        self.assertFalse(any(c[:2] == ["qm", "start"] for c in self.fixture.calls))
+
+    def test_snippet_storage_admission(self):
+        for field, value in (
+            ("active", 0),
+            ("enabled", 0),
+            ("content", "iso,vztmpl"),
+        ):
+            with self.subTest(field=field):
+                self.fixture.snippet_status = dict(self.fixture.snippet_status, **{field: value})
+                self.fixture.calls.clear()
+                with self.assertRaisesRegex(guest_host.GuestError, "Snippet storage"):
+                    self.execute("apply")
+                self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
+                self.fixture.snippet_status = {
+                    "active": 1,
+                    "enabled": 1,
+                    "type": "dir",
+                    "content": "iso,snippets",
+                }
+
+    def test_unsafe_snippet_directory_refuses_before_clone(self):
+        for fault in ("writable", "absent", "symlink"):
+            with self.subTest(fault=fault):
+                directory = self.fixture.snippets
+                if fault == "writable":
+                    directory.chmod(0o775)
+                elif fault == "absent":
+                    directory.rmdir()
+                else:
+                    real = directory.with_name("real-snippets")
+                    real.mkdir(mode=0o755)
+                    directory.rmdir()
+                    directory.symlink_to(real)
+                self.fixture.calls.clear()
+                with self.assertRaises((guest_host.GuestError, OSError)):
+                    self.execute("apply")
+                self.assertFalse(any(c[:2] == ["qm", "clone"] for c in self.fixture.calls))
+                if fault == "symlink":
+                    directory.unlink()
+                    directory.with_name("real-snippets").rmdir()
+                if not directory.exists():
+                    directory.mkdir(mode=0o755)
+                directory.chmod(0o755)
+
+    def test_teardown_releases_seed_only_when_unreferenced(self):
+        for case in (
+            "referenced",
+            "snapshot-reference",
+            "incomplete",
+            "changed",
+            "missing",
+            "clean",
+        ):
+            with self.subTest(case=case):
+                self.execute("apply")
+                path = self.seed_file()
+                config = copy.deepcopy(self.fixture.guests[1101]["config"])
+                if case == "referenced":
+                    self.fixture.guests[1300] = {
+                        "config": config,
+                        "status": "stopped",
+                        "pending": [],
+                    }
+                elif case == "snapshot-reference":
+                    self.fixture.guests[1300] = {
+                        "config": {"name": "other"},
+                        "status": "stopped",
+                        "pending": [],
+                    }
+                    self.fixture.snapshots[1300] = {"old": {"config": config}}
+                elif case == "changed":
+                    path.write_bytes(b"changed")
+                elif case == "missing":
+                    path.unlink()
+                if case == "incomplete":
+                    with (
+                        patch.object(
+                            guest_host, "PVE_NODES", self.fixture.nodes.with_name("absent")
+                        ),
+                        self.assertRaisesRegex(guest_host.GuestError, "incomplete"),
+                    ):
+                        self.execute("teardown", confirmed=True, exclusive=True)
+                elif case in ("referenced", "snapshot-reference", "changed"):
+                    with self.assertRaisesRegex(guest_host.GuestError, "retained"):
+                        self.execute("teardown", confirmed=True, exclusive=True)
+                else:
+                    result = self.execute("teardown", confirmed=True, exclusive=True)
+                    self.assertEqual(result[-1]["action"], "destroyed")
+                self.assertNotIn(1101, self.fixture.guests)
+                self.assertEqual(path.exists(), case not in ("missing", "clean"))
+                self.fixture.guests.pop(1300, None)
+                self.fixture.snapshots.pop(1300, None)
+                path.unlink(missing_ok=True)
+
+    def test_unreadable_seed_after_destroy_reports_removed_guest(self):
+        for fault in ("symlink", "directory"):
+            with self.subTest(fault=fault):
+                self.execute("apply")
+                path = self.seed_file()
+                content = path.read_bytes()
+                if fault == "symlink":
+                    target = self.fixture.snippets / "target"
+                    target.write_bytes(content)
+                    path.unlink()
+                    path.symlink_to(target)
+                else:
+                    shutil.rmtree(self.fixture.snippets)
+                with self.assertRaisesRegex(
+                    guest_host.GuestError, "^Guest removed; network seed retained"
+                ):
+                    self.execute("teardown", confirmed=True, exclusive=True)
+                self.assertNotIn(1101, self.fixture.guests)
+                if fault == "directory":
+                    self.fixture.snippets.mkdir(mode=0o755)
+                for item in self.fixture.snippets.iterdir():
+                    item.unlink()
+
     def test_selected_teardown(self):
         self.execute("apply")
         template = copy.deepcopy(self.fixture.template.config)
         unselected = copy.deepcopy(self.fixture.guests[1101])
+        unselected["config"].pop("cicustom")
         self.fixture.guests[1200] = unselected
         del self.fixture.snapshots[1101]["clean"]
         self.fixture.guests[1101]["config"].pop("parent")

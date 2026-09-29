@@ -8,6 +8,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestProfiles(unittest.TestCase):
+    def test_ubuntu_installed_python(self):
+        image = json.loads((ROOT / "vars/images.json").read_text())["ubuntu"]
+        self.assertEqual(image["release"], "26.04")
+        self.assertEqual(image["build"], "20260918")
+        self.assertEqual(
+            image["sha256"],
+            "4908fb59ccd4e87ae4e8e973b7ef56f535448eacb24a87fd787270c0048987bc",
+        )
+        self.assertTrue(image["baseline"]["management_packages"]["python3"].startswith("3.14."))
+
     def test_four_pins(self):
         profiles = json.loads((ROOT / "vars/images.json").read_text())
         self.assertEqual(set(profiles), {"ubuntu", "fedora", "rocky", "opensuse"})

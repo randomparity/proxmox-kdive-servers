@@ -204,6 +204,18 @@ def template_inputs(host):
 
 def validate_host(host):
     validate_template_host(host)
+    if host["profile"] == "ubuntu":
+        text_field(
+            host.get("cloudinit_snippet_storage"),
+            "cloudinit_snippet_storage",
+            r"[A-Za-z_][A-Za-z0-9_.-]{0,127}",
+        )
+    else:
+        require(
+            "cloudinit_snippet_storage" not in host,
+            "cloudinit_snippet_storage",
+            "only the ubuntu profile uses a snippet network seed",
+        )
     integer(host.get("vmid"), "vmid", 100, 999999999)
     fqdn = host.get("fqdn")
     require(

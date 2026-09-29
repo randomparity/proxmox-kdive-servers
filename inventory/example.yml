@@ -27,6 +27,7 @@ all:
       hosts:
         ubuntu:
           profile: ubuntu
+          cloudinit_snippet_storage: local
           template_vmid: 9001
           vmid: 1101
           fqdn: ubuntu.example.invalid
