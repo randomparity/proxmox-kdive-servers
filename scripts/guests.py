@@ -716,7 +716,7 @@ def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False, leve
                 outcomes = []
                 for index, request in enumerate(requests):
                     event = (
-                        read_admitted(process, requests[0]["host"])
+                        read_admitted(process, request["host"])
                         if index == 0
                         else read_event(process)
                     )

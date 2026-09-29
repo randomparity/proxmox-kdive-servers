@@ -142,9 +142,10 @@ def check_capacity(requests, node, memory, storages, source_extents=None):
     match = re.search(r"^MemAvailable:\s+([0-9]+) kB$", memory, re.MULTILINE)
     check(match is not None, "Missing MemAvailable; inspect native memory metrics")
     memory_mib = sum(r["host"]["memory_mib"] for r in requests)
-    if memory_mib * 1024 > int(match[1]):
+    available_kib = int(match[1])
+    if memory_mib * 1024 > available_kib:
         warnings.append(
-            {"resource": "memory", "requested": memory_mib, "available": int(match[1]) // 1024}
+            {"resource": "memory", "requested": memory_mib, "available": available_kib // 1024}
         )
     for storage, status in storages.items():
         extent = status["extent_bytes"]
