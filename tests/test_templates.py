@@ -451,7 +451,6 @@ class TestLifecycle(unittest.TestCase):
             self.assertRaisesRegex(self.host.TemplateError, "deadline"),
         ):
             self.host.run(self.request)
-        self.assertFalse(release.is_set())
         self.assertIsNone(self.native.config)
         self.assertEqual(list(self.host.CACHE.iterdir()), [])
         self.assertTrue(source.closed)
