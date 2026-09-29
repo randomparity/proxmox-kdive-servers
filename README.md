@@ -801,7 +801,7 @@ from a clean-host installation in these ways:
 - It sits above `toolchain`, which already installs libvirt/QEMU, Docker and the operator's
   group memberships that the KDIVE host play is expected to provide.
 - It installs `python3-packaging` itself before the host play.
-- It runs `ansible-playbook` directly, not the documented
+- It runs `ansible-playbook` directly, not the documented upstream KDIVE
   `examples/local-libvirt/install-host.sh` entry point.
 - It performs no real guest provision/boot and no repeat setup; its proof is not a nested VM
   provisioning or kdump proof.
