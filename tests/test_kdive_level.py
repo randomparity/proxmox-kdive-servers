@@ -3,6 +3,7 @@
 import ast
 import contextlib
 import copy
+import hashlib
 import inspect
 import io
 import json
@@ -114,6 +115,32 @@ class KdiveContractTests(unittest.TestCase):
                 self.assertIn("python3-packaging", script)
                 self.assertIn("/usr/bin/python3 -I -B -c 'import packaging'", script)
                 self.assertLess(index, phases.index("host-install"))
+
+    def test_installed_unit_checks_use_valid_instances(self):
+        def systemctl(argv):
+            self.assertFalse(any("@.service" in arg for arg in argv))
+            return "enabled" if "is-enabled" in argv else "loaded"
+
+        content = {
+            "repo": INPUTS["repo"],
+            "kdive_sha": INPUTS["commit"],
+            "kernel_commit": "b" * 40,
+            "playbook_inputs_sha256": hashlib.sha256(b"{}").hexdigest(),
+        }
+        with (
+            patch.object(g, "kdive_tree"),
+            patch.object(g, "kdive_context", return_value=("operator", None, Path("/tmp"))),
+            patch.object(g, "kernel_path", return_value=Path("/tmp/kernel")),
+            patch.object(g, "kernel_git", return_value=content["kernel_commit"]),
+            patch.object(g, "kdive_configuration", return_value={}),
+            patch.object(g, "kdive_state"),
+            patch.object(g, "kdive_witness"),
+            patch.object(g, "kdive_stopped"),
+            patch.object(g, "kdive_command"),
+            patch.object(g, "kdive_backend_check"),
+            patch.object(g, "command", side_effect=systemctl),
+        ):
+            g.check_kdive({}, content)
 
     def test_native_binding_credentials_are_exact_private_files(self):
         with tempfile.TemporaryDirectory() as temp:

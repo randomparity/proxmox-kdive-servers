@@ -1406,7 +1406,10 @@ def check_kdive(request, content):
         == "enabled",
         "KDIVE lifecycle socket must be enabled",
     )
-    for unit in ("kdive-live-worker@.service", "kdive-live-worker-lifecycle@.service"):
+    for unit in (
+        "kdive-live-worker@1.service",
+        "kdive-live-worker-lifecycle@contract-probe.service",
+    ):
         check(
             command(["systemctl", "show", unit, "--property=LoadState", "--value"]).strip()
             == "loaded",
