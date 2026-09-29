@@ -155,6 +155,7 @@ Other groups may coexist, but these checks only validate managed `kdive` hosts.
 | `vlan` | Optional integer 1–4094; guest NIC tag; omit for an untagged guest |
 | `nic_model`, `nic_queues` | NIC model (default `virtio`); optional integer 0–64 queues, only for virtio |
 | `balloon_mib` | Balloon target in MiB, default `memory_mib`; 0 disables, otherwise at most `memory_mib` |
+| `cloudinit_snippet_storage` | Required for `ubuntu` guests only, rejected for other profiles: an operator-enabled snippet storage |
 | `template_vmid`, `cpu` | Explicit template ID 100–999999999 and guest CPU model name; `host` is the default example |
 | `proxmox_ssh_host`, `proxmox_ssh_user`, `proxmox_ssh_port` | Native host SSH endpoint, root-capable login, port default 22 |
 | `proxmox_ssh_private_key_file` | Optional private-key path; blank/omitted uses normal SSH identities |
@@ -325,6 +326,18 @@ family. Changing from the previous Ubuntu 24.04 pin changes template and guest i
 use separately assigned replacement resources and rebuild the snapshot chain. Existing
 captures do not become compatible by editing their metadata.
 
+Ubuntu 26.04's cloud-init refuses to rename an already active interface, and the network
+config Proxmox generates always renames it. Ubuntu guests therefore take their network
+config from a product-written snippet that matches the cloned NIC by MAC and never renames
+it; user, keys and hostname remain native. Before provisioning Ubuntu, the operator enables
+`snippets` content on an active directory storage (for example
+`pvesm set local --content <existing>,snippets`) whose `snippets/` directory exists, is owned
+by root and is not group- or world-writable; the tools never change storage configuration.
+Name that storage in `cloudinit_snippet_storage`. Inventory validation covers every managed
+host, so an inventory holding an Ubuntu host must add the field before any guest operation.
+The field changes Ubuntu guest identities; Ubuntu guests provisioned without it are no longer
+managed by these tools, while other profiles' identities are unchanged.
+
 Import/rerun proof establishes template identity and storage eligibility. Guest
 provisioning below establishes boot, networking, cloud-init and nested KVM.
 The [clean snapshot lifecycle](#clean-snapshot-lifecycle) consumes this identity for fresh
@@ -405,6 +418,13 @@ seed with a generated `scsi1` seed on its VirtIO SCSI controller. Native removal
 frees the old seed volume; creation regenerates it from inventory. Root and EFI
 volumes, VM UUID and source templates are preserved and checked. Failure leaves
 an inspectable partial; reruns do not resume or repair it.
+Ubuntu clones first receive an immutable network seed `kdive-net-<vmid>-<sha256>.yaml` in
+the snippet storage, referenced as `cicustom: network=<storage>:snippets/<name>`. Its name is
+the SHA-256 of its bytes, and the bytes carry the guest identity, so the file is never
+rewritten; an existing file is reused only when byte-identical, root owned, singly linked
+and not group- or world-writable. Provisioning, verify, level preparation, restore and every
+start re-derive the seed from the NIC MAC and inventory and require the exact reference and
+bytes; a missing or changed seed stops before start for operator inspection.
 Only fresh clones receive management preparation: the pinned Ubuntu image needs
 `qemu-guest-agent`; the other three already contain it. Existing SSH/sudo/Python/
 cloud-init are checked. The installed guest KVM vendor module is loaded and named
@@ -514,6 +534,11 @@ preserves shared templates and unselected VMs. It accepts a complete matching ol
 without `clean`, enabling intentional replacement; absent selected guests are an unchanged result.
 Foreign ownership, changed configuration, unknown disks or snapshot references, incomplete
 allocations and native task locks require inspection instead of broader deletion.
+Ubuntu teardown checks the seed reference but not its bytes. After the VM is gone it deletes
+the seed only when every VM and container configuration in the cluster (current, pending and
+snapshot sections) reads cleanly and none names it; otherwise the file is retained and the
+command fails after removal so the operator can inspect it. A rerun reports the guest absent
+and does not revisit the retained file.
 
 ```sh
 make teardown
