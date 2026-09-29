@@ -203,8 +203,11 @@ class TestGuestHost(unittest.TestCase):
             efidisk0="pool:vm-1101-disk-1,efitype=4m,pre-enrolled-keys=1,size=4M",
         )
         config["ipconfig0"] = ",".join(reversed(config["ipconfig0"].split(",")))
+        config["cicustom"] = "network=" + guest_host.seed_volume(self.request, config)[0]
         guest_host.check_configuration(self.request, config, [], "ready")
         for key, value in [
+            ("cicustom", "network=local:snippets/other.yaml"),
+            ("cicustom", config["cicustom"] + ",user=local:snippets/user.yaml"),
             ("onboot", 1),
             ("memory", 2),
             ("ide2", "foreign:disk"),
@@ -220,6 +223,53 @@ class TestGuestHost(unittest.TestCase):
             guest_host.check_configuration(
                 self.request, config, [{"key": "cores", "pending": 3}], "ready"
             )
+
+    def test_missing_seed_reference_is_drift(self):
+        config = guest_host.desired_config(self.request)
+        config.update(net0="virtio=02:11:22:33:44:55,bridge=vmbr0")
+        for phase in ("preparing", "ready"):
+            config["description"] = guest_host.marker(self.request, phase)
+            with (
+                self.subTest(phase=phase),
+                self.assertRaisesRegex(guest_host.GuestError, "seed reference"),
+            ):
+                guest_host.check_configuration(self.request, config, [], phase)
+
+    def test_network_seed_matches_mac_without_rename(self):
+        seed = guest_host.network_seed(self.request, "BC:24:11:00:00:01")
+        expected = (
+            f"# kdive-guest-network-v1 identity={guest_host.identity(self.request)}\n"
+            "version: 2\n"
+            "ethernets:\n"
+            "  kdive0:\n"
+            "    match:\n"
+            '      macaddress: "bc:24:11:00:00:01"\n'
+            "    dhcp4: false\n"
+            '    addresses: ["192.0.2.11/24"]\n'
+            "    routes:\n"
+            "      - to: default\n"
+            '        via: "192.0.2.1"\n'
+            "    nameservers:\n"
+            '      addresses: ["192.0.2.53"]\n'
+            '      search: ["example.invalid"]\n'
+        )
+        self.assertEqual(seed, expected.encode())
+        self.assertNotIn(b"set-name", seed)
+        volume, name, content = guest_host.seed_volume(
+            self.request, {"net0": "virtio=BC:24:11:00:00:01,bridge=vmbr0"}
+        )
+        self.assertEqual(content, seed)
+        self.assertEqual(name, f"kdive-net-1101-{guest_host.hashlib.sha256(seed).hexdigest()}.yaml")
+        self.assertEqual(volume, "local:snippets/" + name)
+        other = guest_host.seed_volume(
+            self.request, {"net0": "virtio=BC:24:11:00:00:02,bridge=vmbr0"}
+        )
+        self.assertNotEqual(other[1], name)
+
+    def test_network_seed_canonicalizes_address(self):
+        self.host["ipv4_cidr"] = "192.0.2.11/255.255.255.0"
+        seed = guest_host.network_seed(self.request, "02:11:22:33:44:55")
+        self.assertIn(b'addresses: ["192.0.2.11/24"]', seed)
 
 
 class TestGuestVerifier(unittest.TestCase):
@@ -938,9 +988,33 @@ class GuestNativeFixture:
         self.destination_extent = 0
         self.snapshots = {}
         self.disk_state = {}
+        self.snippets = None
+        self.nodes = None
+        self.snippet_status = {"active": 1, "enabled": 1, "type": "dir", "content": "iso,snippets"}
 
     def __call__(self, argv, **kwargs):
+        result = self.run(argv, **kwargs)
+        if self.nodes is not None:
+            self.sync_configuration_files()
+        return result
+
+    def sync_configuration_files(self):
+        """Mirror native configuration files: current, pending and snapshot sections."""
+        directory = self.nodes / self.template.node / "qemu-server"
+        directory.mkdir(parents=True, exist_ok=True)
+        for path in directory.glob("*.conf"):
+            path.unlink()
+        configs = {9001: {"config": self.template.config}} if self.template.config else {}
+        configs |= self.guests
+        for vmid, guest in configs.items():
+            sections = [guest["config"], guest.get("pending", [])]
+            sections += [snap["config"] for snap in self.snapshots.get(vmid, {}).values()]
+            (directory / f"{vmid}.conf").write_text(json.dumps(sections))
+
+    def run(self, argv, **kwargs):
         self.calls.append(argv)
+        if argv[:2] == ["pvesm", "path"]:
+            return str(self.snippets / argv[2].rsplit("/", 1)[1]) + "\n"
         if argv[:2] in (
             ["qm", "snapshot"],
             ["qm", "rollback"],
@@ -1075,6 +1149,9 @@ class GuestNativeFixture:
             return json.dumps(self.template.volumes + self.volumes)
         if path == f"/nodes/{self.template.node}/status":
             return json.dumps({"cpuinfo": {"cpus": 24}, "cpu": 0, "loadavg": ["1"]})
+        storage = self.request["host"].get("cloudinit_snippet_storage")
+        if storage and path == f"/nodes/{self.template.node}/storage/{storage}/status":
+            return json.dumps(self.snippet_status)
         for vmid, guest in self.guests.items():
             prefix = f"/nodes/{self.template.node}/qemu/{vmid}/"
             if path.startswith(prefix):
@@ -1127,6 +1204,10 @@ class TestNativeLifecycle(unittest.TestCase):
         self.stack.enter_context(patch.object(guest_verify, "kvm_probe", return_value=12))
         self.temp = self.stack.enter_context(tempfile.TemporaryDirectory())
         self.stack.enter_context(patch.object(t, "LOCKS", Path(self.temp) / "locks"))
+        self.fixture.snippets = Path(self.temp) / "snippets"
+        self.fixture.snippets.mkdir(mode=0o755)
+        self.fixture.nodes = Path(self.temp) / "nodes"
+        self.stack.enter_context(patch.object(guest_host, "PVE_NODES", self.fixture.nodes))
         original_read = Path.read_text
         self.stack.enter_context(
             patch.object(
