@@ -1,6 +1,7 @@
 """Plan, provision or verify explicitly selected owned Linux guests."""
 
 import argparse
+import base64
 import json
 import math
 import os
@@ -12,6 +13,7 @@ import stat
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 if __package__:
@@ -388,7 +390,10 @@ def host_ssh(host):
             "-o",
             "IdentitiesOnly=yes",
         ]
-    return argv + ["--", host["proxmox_ssh_host"], "python3 -u -c " + shlex.quote(host_source())]
+    # Keep the authenticated bootstrap below the operating system's per-argument limit.
+    encoded = base64.b64encode(zlib.compress(host_source().encode())).decode("ascii")
+    bootstrap = f"import base64,zlib;exec(zlib.decompress(base64.b64decode({encoded!r})))"
+    return argv + ["--", host["proxmox_ssh_host"], "python3 -u -c " + shlex.quote(bootstrap)]
 
 
 def validate_event(request, event, phase, level="clean"):

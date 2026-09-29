@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -86,6 +87,20 @@ class KernelInputTests(unittest.TestCase):
                 self.assertEqual(guests.main(), 0)
                 forwarded = dispatch.call_args.args[0][0]
                 self.assertEqual("kernel_source" in forwarded, operation == "--prepare-level")
+
+    def test_native_bootstrap_executes_beyond_raw_argument_limit(self):
+        argv = shlex.split(guests.host_ssh(request()["host"])[-1])
+        self.assertLess(len(argv[-1].encode()), 131072)
+        result = subprocess.run(argv, input="", text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("error", json.loads(result.stdout))
+        with patch.object(
+            guests, "host_source", return_value="print('transport-ok')\n#" + "x" * 200000
+        ):
+            argv = shlex.split(guests.host_ssh(request()["host"])[-1])
+            result = subprocess.run(argv, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "transport-ok\n")
 
     def test_exact_kernel_diagnostics_cross_both_boundaries(self):
         envelope = {
