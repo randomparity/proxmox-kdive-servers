@@ -409,11 +409,9 @@ class RockySourceTests(unittest.TestCase):
             real_stat = Path.lstat
 
             def metadata(target):
-                info = real_stat(target)
-                return SimpleNamespace(
-                    st_mode=info.st_mode & ~0o022 if stat.S_ISDIR(info.st_mode) else info.st_mode,
-                    st_uid=0,
-                )
+                if target in path.parents:
+                    return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+                return SimpleNamespace(st_mode=real_stat(target).st_mode, st_uid=0)
 
             with (
                 patch.object(Path, "lstat", metadata),
