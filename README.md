@@ -660,3 +660,21 @@ recursive ownership, detached matching HEAD, depth-one shallow history and clean
 including ignored build products such as `.config` and object files. Deepening history,
 configuring or building in this tree makes verification fail. Restore the captured level
 or deliberately prepare a replacement; the tool does not delete trees or snapshots.
+
+Native proof on 2026-09-28 used Linux `v6.9` commit
+`a38297e3fb012ddfa7ce0321a7e5a8daeb1872b6` on Ubuntu 24.04 and Fedora 44.
+Both reached READY and passed verification of the operator-captured snapshot. An
+untracked file, ignored `.config`, wrong HEAD and wrong file owner each failed verification;
+restoring `kernel-src` repaired each isolated fault and passed an independent reverify.
+Both guests finished stopped with `clean`, `toolchain` and `kernel-src` retained.
+
+Measured root-volume allocation above `toolchain` at READY:
+
+| Profile | New blocks since toolchain (MiB) | Referenced-size increase (MiB) |
+| --- | ---: | ---: |
+| Ubuntu 24.04 | 934.66 | 785.68 |
+| Fedora 44 | 705.05 | 537.04 |
+
+These are native ZFS `written@toolchain` and `referenced` differences against the
+parent snapshot (1 MiB = 1,048,576 bytes), excluding disk reservations. They measure
+these prepared trees and guest writes, not a capacity guarantee.
