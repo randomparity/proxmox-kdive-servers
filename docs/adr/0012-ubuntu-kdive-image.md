@@ -37,9 +37,10 @@ deletes it only after the guest is gone and no configuration references it.
 - Replace resources in place: judgment: preserving the old resources makes this bounded
   proof easier to reverse and follows the operator's explicit replacement approval.
 - Native v2 NoCloud network output: verified: `nocloud_network_v2` in
-  `PVE/QemuServer/Cloudinit.pm` (pve-manager 9.2.20) also emits `set-name: eth<id>`.
-- ConfigDrive seed: verified: `configdrive2_network` in the same file emits legacy ENI for
-  `eth0`, and cloud-init's ConfigDrive source converts it without MAC matching.
+  `PVE/QemuServer/Cloudinit.pm` (qemu-server 9.2.8) also emits `set-name: eth<id>`.
+- ConfigDrive seed: verified: `configdrive2_network` in the same file (qemu-server 9.2.8)
+  emits legacy ENI for `eth0`, and cloud-init's ConfigDrive source converts it without
+  MAC matching.
 - Reboot after the failed first boot: judgment: a workaround that leaves fresh provisioning
   failing and bakes an untested second boot into the clean baseline.
 - Modify the pinned image or template cloud.cfg: judgment: breaks the immutable upstream
@@ -56,6 +57,9 @@ A moving upstream main can still prevent preparation after selection; failure do
 permit advancing the pin. The bounded HTTP proof is not a nested VM or kdump proof.
 
 Ubuntu provisioning now needs a snippet-capable storage configured by the operator, and
-Ubuntu guest identities change. A missing or altered seed stops verify, restore and
-teardown until inspected. Teardown can leave a seed file behind when references remain;
-it fails loudly rather than deleting. Other profiles are unaffected.
+Ubuntu guest identities change. Non-Ubuntu identities are unchanged, but inventory
+validation covers every host, so an inventory holding an Ubuntu host must add the field
+before any guest operation, and previously provisioned Ubuntu guests are no longer
+managed by the product. A missing or altered seed stops verify and restore until
+inspected. Teardown can leave a seed file behind when references remain; it fails loudly
+rather than deleting.
