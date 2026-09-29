@@ -554,17 +554,21 @@ class TestController(unittest.TestCase):
         import io
         import os
         import signal
-        import time
+        import threading
         from unittest.mock import patch
 
         from scripts.validate_inventory import ValidationError
 
-        class SlowResponse(io.BytesIO):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class BlockedResponse(io.BytesIO):
             def read(self, size):
-                time.sleep(0.2)
+                # Model a socket read that never returns; only the deadline can end it.
+                release.wait(10)
                 return super().read(size)
 
-        source = SlowResponse(b'{"data":{"cpuinfo":{"cpus":8},"memory":{"total":1024}}}')
+        source = BlockedResponse(b'{"data":{"cpuinfo":{"cpus":8},"memory":{"total":1024}}}')
         storage = io.BytesIO(
             b'{"data":{"active":1,"enabled":1,"type":"zfspool","content":"images"}}'
         )
@@ -573,11 +577,14 @@ class TestController(unittest.TestCase):
         env = {self.host[key]: "credential" for key in self.controller.CREDENTIAL_REFS}
         with (
             patch.dict(os.environ, env),
-            patch.object(self.controller, "API_TIMEOUT", 0.03, create=True),
+            patch.object(self.controller, "API_TIMEOUT", 0.25, create=True),
+            # Keep CA-store loading out of the timed window on slow runners.
+            patch("ssl.create_default_context"),
             patch("urllib.request.OpenerDirector.open", side_effect=[source, storage]),
             self.assertRaises(ValidationError),
         ):
             self.controller.api_admission(self.host)
+        self.assertFalse(release.is_set())
         self.assertTrue(source.closed)
         self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
         self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0.0, 0.0))
