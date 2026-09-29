@@ -1434,6 +1434,24 @@ def prepare_kdive(request):
         )
         kernel_git(user, ["-C", str(path), "checkout", "--quiet", "--detach", "FETCH_HEAD"])
     kdive_tree(request, inputs)
+    kernel_git(
+        user,
+        [
+            "-C",
+            str(path),
+            "fetch",
+            "--depth=1",
+            "--",
+            inputs["repo"],
+            "refs/heads/main:refs/remotes/origin/main",
+        ],
+        900,
+    )
+    check(
+        kernel_git(user, ["-C", str(path), "rev-parse", "refs/remotes/origin/main"])
+        == inputs["commit"],
+        "KDIVE upstream main differs from approved pin; select and approve a current pin",
+    )
     kdive_state(prepare=True)
     kdive_command(
         request,

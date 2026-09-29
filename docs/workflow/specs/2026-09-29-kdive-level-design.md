@@ -13,7 +13,7 @@ services, snapshot replacement or warm guest-image/cache level is included.
 
 `make level LEVEL=kdive` extends the existing registry above kernel-src.
 `vars/kdive-source.json` contains HTTPS repo and full lowercase40-hex commit;
-initial pin is727de823e3ab1a00e7c5832e027a31155437d6f7. Inputs affect preparation
+initial pin isdffce52ab48227ba7b8807824e1f79bb96dc18f6. Inputs affect preparation
 only; verify uses recorded metadata. The operator-owned checkout is src/kdive.
 Existing dirty/mismatching trees and preexisting installed state are preserved
 and refused. The generic snapshot envelope and transitive parent binding remain.
@@ -81,3 +81,7 @@ while host daemons remain, so observe upstream daemon_pids and all eight worker 
 a surviving daemon or worker blocks READY even when stack-down exits0. The lifecycle socket
 remains enabled. Validate the installed root-owned0600 witness file against the fixed local
 member DSN, without printing it; shell programs carrying credentials travel on stdin, not argv.
+
+Preparation supplies upstream setup with a genuinely fetched `origin/main` and requires
+it to equal the approved exact source pin before setup. A moved main requires another
+source decision, never an automatic pin update or a self-comparison reference.

@@ -69,6 +69,25 @@ class KdiveContractTests(unittest.TestCase):
                 self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
                 self.assertIn("secret-dsn", logs[0].read_text())
 
+    def test_prepare_requires_genuine_fetched_main_to_match_pin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            req = request()
+            req["kdive_source"] = INPUTS
+            path = Path(temp)
+            with (
+                patch.object(g, "KDIVE_STATE", path / "absent-state"),
+                patch.object(g, "kdive_context", return_value=("operator", None, path)),
+                patch.object(g, "kdive_tree"),
+                patch.object(g, "kernel_git", side_effect=["", "b" * 40]) as git,
+                patch.object(g, "kdive_state") as state,
+            ):
+                with self.assertRaisesRegex(g.GuestError, "main differs"):
+                    g.prepare_kdive(req)
+                self.assertIn(
+                    "refs/heads/main:refs/remotes/origin/main", git.call_args_list[0].args[1]
+                )
+                state.assert_not_called()
+
     def test_native_binding_credentials_are_exact_private_files(self):
         with tempfile.TemporaryDirectory() as temp:
             file = Path(temp) / "dsn"

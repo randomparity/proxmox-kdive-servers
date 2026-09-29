@@ -735,3 +735,8 @@ can select different volumes or publications. Require exactly one pass and no sk
 bounded real HTTP authorization proof. It is not a nested VM provisioning or kdump proof.
 Before capturing, confirm daemon/worker stop and gracefully shut down the guest.
 Boot the guest before `make verify`; keep the KDIVE stack stopped during verification.
+
+KDIVE preparation fetches genuine upstream `main` into `origin/main` for the upstream setup
+schema guard and requires that ref to equal the explicitly approved source pin. If main
+has advanced, preparation stops for source selection; it never advances the pin or bypasses
+the guard. Verification and restore use recorded installed content without this network check.
