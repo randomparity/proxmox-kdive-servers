@@ -242,6 +242,7 @@ def guest_rpc(request, known_hosts, envelope, timeout):
                 guest_verify.TOOLCHAIN_DIAGNOSTICS | guest_verify.KERNEL_DIAGNOSTICS
             ).values()
         }
+        diagnostics[guest_verify.KDIVE_DIAGNOSTIC] = guest_verify.KDIVE_DIAGNOSTIC
         diagnostic = diagnostics.get(result.stderr.removesuffix("\n"))
         if diagnostic:
             raise ValidationError(diagnostic)
@@ -521,7 +522,7 @@ def complete_level(process, request, event, mode, known_hosts, level, guest_uuid
             "chain": event["chain"],
             "proposed": event["proposed"],
         },
-        1800,
+        guest_verify.KDIVE_TIMEOUT if mode == "level" and level == "kdive" else 1800,
     )
     ack = {
         "vmid": request["host"]["vmid"],
@@ -645,7 +646,10 @@ def complete_guest(process, request, event, mode, known_hosts, level="clean"):
         process.stdin.flush()
         event = read_event(process)
     if level != "clean":
+        level_event = event
         event = complete_level(process, request, event, mode, known_hosts, level, guest_uuid)
+        if level == "kdive" and mode != "level":
+            observations["kdive_sha"] = level_event["chain"][-1]["content"]["kdive_sha"]
     if mode != "level":
         validate_event(request, event, "ready", level)
     observations.pop("boot_id")
@@ -804,6 +808,11 @@ def main():
                 )
             )
             request = request_for(host, revision, source)
+            if args.prepare_level and args.level == "kdive":
+                request["kdive_source"] = guest_verify.level_json(
+                    (ROOT / "vars/kdive-source.json").read_text()
+                )
+                guest_verify.kdive_inputs(request["kdive_source"])
             if args.prepare_level and args.level == "kernel-src":
                 request["kernel_source"] = guest_verify.level_json(
                     (ROOT / "vars/kernel-source.json").read_text()
