@@ -27,15 +27,17 @@ class TestValidation(unittest.TestCase):
         self.host = self.data["_meta"]["hostvars"]["ubuntu"]
 
     def test_valid_and_independent_selection(self):
-        self.assertEqual(validate_inventory(self.data), 4)
+        self.assertEqual(validate_inventory(self.data), 7)
         self.assertEqual(validate_inventory(self.data, "ubuntu,fedora"), 2)
-        self.host["profile"] = "fedora"
-        self.host.pop("cloudinit_snippet_storage")
-        self.assertEqual(validate_inventory(self.data), 4)
+        for name in ("ubuntu", "ubuntu-install"):
+            host = self.data["_meta"]["hostvars"][name]
+            host["profile"] = "fedora"
+            host.pop("cloudinit_snippet_storage")
+        self.assertEqual(validate_inventory(self.data), 7)
 
     def test_snippet_storage_is_ubuntu_only(self):
         self.assertEqual(self.host["cloudinit_snippet_storage"], "local")
-        self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
+        self.assertEqual(validate_inventory(self.data, purpose="templates"), 7)
         for value in (None, "bad id!", 3):
             with self.subTest(value=value):
                 changed = copy.deepcopy(self.data)
@@ -58,8 +60,8 @@ class TestValidation(unittest.TestCase):
             vlan=25,
             cloudinit_snippet_storage="local",
         )
-        self.assertEqual(validate_inventory(self.data), 4)
-        self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
+        self.assertEqual(validate_inventory(self.data), 7)
+        self.assertEqual(validate_inventory(self.data, purpose="templates"), 7)
         other["proxmox_node"] = "node2"
         with self.assertRaises(ValidationError):
             validate_inventory(self.data)
@@ -78,7 +80,7 @@ class TestValidation(unittest.TestCase):
             balloon_mib=4096,
         )
         for purpose in ("guests", "templates"):
-            self.assertEqual(validate_inventory(self.data, purpose=purpose), 4)
+            self.assertEqual(validate_inventory(self.data, purpose=purpose), 7)
         for field, values in {
             "cpu": [None, True, "bad model", "host,flags=oops"],
             "nic_model": ["unknown", None, True],
@@ -198,19 +200,21 @@ class TestValidation(unittest.TestCase):
     def test_integer_boundaries_and_small_subnet(self):
         for field in ["cores", "memory_mib", "disk_gib"]:
             self.host[field] = 2147483647
+            self.data["_meta"]["hostvars"]["ubuntu-install"][field] = 2147483647
         self.host["vlan"] = 4094
         self.host["vmid"] = 100
         self.host["proxmox_api_port"] = 65535
+        self.data["_meta"]["hostvars"]["ubuntu-install"]["proxmox_api_port"] = 65535
         self.host["ipv4_cidr"] = "192.0.2.11/31"
         self.host["gateway"] = "192.0.2.10"
-        self.assertEqual(validate_inventory(self.data), 4)
+        self.assertEqual(validate_inventory(self.data), 7)
 
     def test_nested_groups_and_nonmanaged_hosts(self):
         hosts = self.data["kdive"].pop("hosts")
         self.data["kdive"]["children"] = ["test_guests"]
         self.data["test_guests"] = {"hosts": hosts}
         self.data["_meta"]["hostvars"]["unrelated"] = {"vmid": self.host["vmid"]}
-        self.assertEqual(validate_inventory(self.data), 4)
+        self.assertEqual(validate_inventory(self.data), 7)
         self.data["test_guests"]["hosts"] = []
         with self.assertRaises(ValidationError):
             validate_inventory(self.data)
@@ -272,7 +276,7 @@ class TestTemplateValidation(unittest.TestCase):
                 dns_servers=[],
                 proxmox_ssh_private_key_file=None,
             )
-        self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
+        self.assertEqual(validate_inventory(self.data, purpose="templates"), 7)
         with self.assertRaises(ValidationError):
             validate_inventory(self.data)
 
@@ -282,7 +286,7 @@ class TestTemplateValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "template_vmid"):
             validate_inventory(self.data, "fedora", purpose="templates")
         other["profile"] = self.host["profile"]
-        self.assertEqual(validate_inventory(self.data, purpose="templates"), 4)
+        self.assertEqual(validate_inventory(self.data, purpose="templates"), 7)
         for field, value in [("proxmox_node", "node2"), ("proxmox_api_host", "different.invalid")]:
             with self.subTest(field=field):
                 original = other.copy()

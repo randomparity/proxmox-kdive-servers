@@ -54,3 +54,25 @@ all:
           fqdn: opensuse.example.invalid
           ansible_host: 192.0.2.14
           ipv4_cidr: 192.0.2.14/24
+        ubuntu-install:
+          profile: ubuntu
+          cloudinit_snippet_storage: local
+          template_vmid: 9001
+          vmid: 1111
+          fqdn: ubuntu-install.example.invalid
+          ansible_host: 192.0.2.21
+          ipv4_cidr: 192.0.2.21/24
+        fedora-install:
+          profile: fedora
+          template_vmid: 9002
+          vmid: 1112
+          fqdn: fedora-install.example.invalid
+          ansible_host: 192.0.2.22
+          ipv4_cidr: 192.0.2.22/24
+        rocky-install:
+          profile: rocky
+          template_vmid: 9003
+          vmid: 1113
+          fqdn: rocky-install.example.invalid
+          ansible_host: 192.0.2.23
+          ipv4_cidr: 192.0.2.23/24
