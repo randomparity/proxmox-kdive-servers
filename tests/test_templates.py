@@ -428,16 +428,19 @@ class TestLifecycle(unittest.TestCase):
     def test_download_deadline_interrupts_blocking_read(self):
         import io
         import signal
-        import time
+        import threading
         from unittest.mock import patch
+
+        release = threading.Event()
+        self.addCleanup(release.set)
 
         class SlowResponse(io.BytesIO):
             def geturl(self):
                 return "https://vendor.invalid/image"
 
             def read(self, size):
-                # Model a socket read that keeps receiving data past the total deadline.
-                time.sleep(0.2)
+                # Model a socket read that never returns; only the deadline can end it.
+                release.wait(10)
                 return super().read(size)
 
         source = SlowResponse(self.payload)
