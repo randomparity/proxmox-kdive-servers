@@ -748,8 +748,7 @@ these prepared trees and guest writes, not a capacity guarantee.
 The checkout lives at the operator's `~/src/kdive`; mismatching or dirty existing trees are
 preserved and refused. Preparation delegates `just setup` and the upstream local-libvirt
 host play. It requires installed Python 3.14; the upstream play must provide its native
-`guestfs` binding. Ubuntu now selects the supported 26.04 image; its installed proof remains
-pending until the replacement guest completes the cycle. Fedora 44 has a completed proof.
+`guestfs` binding. Ubuntu 26.04 and Fedora 44 have completed proofs.
 openSUSE is excluded;
 Rocky has a verified toolchain snapshot; its kernel-source and KDIVE preparation remain unverified.
 
@@ -824,3 +823,19 @@ allocation above `kernel-src` was 6,853.27 MiB written and 6,125.94 MiB addition
 data. These measurements include the explicitly preserved setup attempts and are not a
 minimal clean-install size. The corrected final verifier was proven against that installation;
 the entire fresh-install command was not replayed after the query-only correction.
+
+Ubuntu 26.04 native proof on 2026-09-29 used KDIVE commit
+`8182457399c25f1fd180806a10a0014d1877ed2b` on a fresh replacement guest provisioned with the
+MAC-matched network seed. The operator captured `clean`, `toolchain`, `kernel-src` and
+`kdive` without RAM after each READY; each level was verified and restored. The installed
+lifecycle interpreters (the lifecycle service virtual environment and the KDIVE project
+environment, both Python 3.14.4) import the native `guestfs` binding from Ubuntu's
+`python3-guestfs`. After `kdive` restore, exactly one HTTP authorization test passed with zero
+skips under strict stack revision checking; its only warning reported the Kubernetes-only
+lifecycle witness as not deployed. No setup or Ansible step ran after restore. The stack
+stopped with no containers or workers left, final verification passed and the guest stopped.
+
+Restore took 95.071 seconds; the test started 39.316 seconds after restore completed, or
+134.387 seconds after restore began (guest clock test-start marker). Native ZFS allocation
+above `kernel-src` was 9,245.50 MiB written and 9,152.84 MiB additional referenced data for
+a single clean installation.
