@@ -509,18 +509,15 @@ def read_event(process):
     except ValueError:
         raise ValidationError("Native guest: invalid result; inspect private host state") from None
     if isinstance(event, dict) and "error" in event:
+        reason = "operation failed; inspect ownership, configuration and prerequisites"
         code = event.get("code")
-        reason = (
-            HOST_REASONS.get(code)
-            if set(event) == {"error", "code"}
+        if (
+            set(event) == {"error", "code"}
             and isinstance(event["error"], str)
             and type(code) is str
-            else None
-        )
-        raise ValidationError(
-            "Native guest: "
-            + (reason or "operation failed; inspect ownership, configuration and prerequisites")
-        )
+        ):
+            reason = HOST_REASONS.get(code, reason)
+        raise ValidationError(f"Native guest: {reason}")
     return event
 
 
