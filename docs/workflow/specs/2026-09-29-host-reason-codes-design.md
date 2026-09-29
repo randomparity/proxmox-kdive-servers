@@ -32,8 +32,8 @@ Host (`scripts/guest_host.py`):
 Controller (`scripts/guests.py`): `HOST_REASONS` maps each code above to controller text.
 `read_event` raises `ValidationError("Native guest: " + text)` where `text` is
 `HOST_REASONS[event["code"]]` when the event is a dict whose key set is exactly
-`{"error", "code"}` and whose `code` is a `str` key of `HOST_REASONS`; otherwise `text` is
-the existing generic "operation failed; inspect ownership, configuration and prerequisites".
+`{"error", "code"}`, whose `error` is a string and whose `code` is a `str` key of
+`HOST_REASONS`; otherwise `text` is the existing generic "operation failed; inspect ownership, configuration and prerequisites".
 `main()` already prints it as `Guest operation failed: <message>`.
 
 ## Failure model
@@ -60,8 +60,9 @@ the existing generic "operation failed; inspect ownership, configuration and pre
 
 ## Success and validation
 
-- Each code maps to its own text; an unknown, non-string, `None` or missing code, or an extra
-  key, prints the generic message; host `error` text never appears (`tests/test_guests.py`).
+- Each code maps to its own text; an unknown, non-string, `None` or missing code, an extra
+  key or a non-string `error` prints the generic message; host `error` text never appears
+  (`tests/test_guests.py`).
 - `guest_host.main` emits `code` only for a `ReasonError` (`tests/test_guests.py`).
 - Every literal code passed to `refuse` in `scripts/guest_host.py` is a `HOST_REASONS` key and
   every key is used (AST test in `tests/test_guests.py`).
