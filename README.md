@@ -578,6 +578,41 @@ inspection. Failed work retains its observed state; complete owned guests can be
 torn down after tasks finish, while incomplete/ambiguous allocations need manual recovery.
 Snapshots cover VM state only, not external services, DNS, backups or test artifact storage.
 
+### Clean-only installation guests
+
+KDIVE #2807 installation proofs need a guest that can always return to `clean`. On ZFS storage a
+guest carrying `toolchain`, `kernel-src` or `kdive` snapshots cannot be restored to `clean`,
+because newer snapshots block rollback (see [Operator-captured levels](#operator-captured-levels)),
+and removing them would destroy the warm fixtures the levels exist to provide. Keep the two roles
+on separate guests.
+
+Give each host family (Ubuntu, Fedora, Rocky) a dedicated clean-only guest whose only snapshot
+is `clean`, and never capture a higher level on it. The example inventory names them
+`ubuntu-install`, `fedora-install` and `rocky-install`; they reuse the `ubuntu`, `fedora` and
+`rocky` profiles and templates with their own VM IDs and network identities, so no level or
+restore semantics change. The `ubuntu`, `fedora` and `rocky` aliases stay the full-chain
+warm-fixture guests.
+
+Reset cycle for each proof:
+
+1. Restore `clean` before the proof, so it starts from the verified baseline.
+2. Run the installation proof and collect its results.
+3. Restore `clean` again afterwards, after releasing external services and artifacts.
+4. When a fresh guest identity is wanted, run `make teardown` then `make provision` instead.
+   Recreation changes guest SSH keys; follow the pin handling under
+   [Clean snapshot lifecycle](#clean-snapshot-lifecycle).
+
+```sh
+export TARGETS=ubuntu-install
+make restore APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1
+```
+
+The dedicated guests are additional VMs beyond the warm-fixture guests. Each uses the sizing in
+[KDIVE installation validation sizing](#kdive-installation-validation-sizing), so run them
+sequentially, one exact target at a time, under the existing live admission checks. All seven
+example aliases together would configure 56 vCPUs, 224 GiB RAM and 1.75 TiB of root disks, so
+always set `TARGETS`; an unset value selects every alias.
+
 ## Operator-captured levels
 
 The level contract supports an ordered, closed registry above `clean`. The implemented
