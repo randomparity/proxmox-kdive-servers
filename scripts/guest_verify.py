@@ -752,6 +752,13 @@ def check_rocky_repositories(epel=False):
             parser = configparser.ConfigParser(interpolation=None)
             parser.read_string(path.read_text())
             for name in parser.sections():
+                if name == "docker-ce-stable":
+                    check(
+                        path == Path("/etc/yum.repos.d/docker-ce.repo")
+                        and not path.is_symlink()
+                        and path.read_text() == DOCKER_REPOSITORY,
+                        "Docker repository conflict; inspect existing source without replacing it",
+                    )
                 if name in required or name.startswith("epel"):
                     check(
                         str(path) in owned

@@ -350,7 +350,13 @@ class RockySourceTests(unittest.TestCase):
         for epel in (False, True):
             with self.source_files(epel) as (directory, _, _):
                 g.check_rocky_repositories(epel)
-                for content in ("[crb]\n", "[epel]\n", "[epel-testing]\n", "not ini"):
+                for content in (
+                    "[crb]\n",
+                    "[epel]\n",
+                    "[epel-testing]\n",
+                    "[docker-ce-stable]\n",
+                    "not ini",
+                ):
                     conflict = directory / "foreign.repo"
                     conflict.write_text(content)
                     with self.assertRaises(g.GuestError):
