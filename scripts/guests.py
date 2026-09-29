@@ -229,6 +229,15 @@ def guest_rpc(request, known_hosts, envelope, timeout):
         raise ValidationError(
             "Guest RPC timed out; inspect retained partial without retry"
         ) from None
+    if (
+        set(envelope) == {"level_operation", "level", "chain", "proposed"}
+        and result.returncode == 1
+        and not result.stdout
+    ):
+        diagnostics = {value: value for value in guest_verify.TOOLCHAIN_DIAGNOSTICS.values()}
+        diagnostic = diagnostics.get(result.stderr.removesuffix("\n"))
+        if diagnostic:
+            raise ValidationError(diagnostic)
     reboot_disconnect = set(envelope) == {"reboot_from"} and result.returncode == 255
     if reboot_disconnect and not result.stdout:
         return REBOOT_DISCONNECTED

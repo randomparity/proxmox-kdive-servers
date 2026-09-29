@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import pty
+import pwd
 import re
 import select
 import shlex
@@ -569,8 +570,385 @@ def reboot(request, previous_boot):
     return {"reboot_requested": True}
 
 
-# Production levels are added in dependency order by their owning changes.
-LEVELS = ()
+# Package lists follow KDIVE docs/operating/install.md; this is only its speed layer.
+TOOLCHAIN_PACKAGES = {
+    "ubuntu": "build-essential pkg-config libvirt-dev python3-dev libelf-dev shellcheck shfmt "
+    "libvirt-daemon-system libvirt-clients qemu-system-x86 docker.io docker-compose-v2",
+    "fedora": "gcc make pkgconf-pkg-config libvirt-devel python3-devel elfutils-libelf-devel "
+    "ShellCheck shfmt libvirt libvirt-client qemu-kvm moby-engine docker-compose",
+    "rocky": "gcc make pkgconf-pkg-config libvirt-devel python3-devel elfutils-libelf-devel "
+    "ShellCheck shfmt libvirt libvirt-client qemu-kvm docker-ce docker-ce-cli containerd.io "
+    "docker-buildx-plugin docker-compose-plugin",
+    "opensuse": "gcc make pkgconf-pkg-config libvirt-devel python3-devel libelf-devel "
+    "ShellCheck shfmt libvirt-daemon-qemu libvirt-daemon-proxy libvirt-client qemu-x86 "
+    "docker docker-compose polkit",
+}
+UV_VERSION = "0.12.19"
+JUST_VERSION = "1.58.0"
+DOCKER_KEY = "060A61C51B558A7F742B77AAC52FEB6B621E9F35"
+DOCKER_REPOSITORY = (
+    "[docker-ce-stable]\nname=Docker CE Stable\n"
+    "baseurl=https://download.docker.com/linux/rhel/$releasever/$basearch/stable\n"
+    "enabled=1\ngpgcheck=1\nsslverify=1\n"
+    "gpgkey=https://download.docker.com/linux/rhel/gpg\n"
+)
+
+
+TOOLCHAIN_DIAGNOSTICS = (
+    {
+        f"Toolchain operator {tool} failed; inspect guest prerequisites and re-prepare": (
+            f"Toolchain {tool} unavailable for operator; restore toolchain or re-prepare"
+        )
+        for tool in (
+            "bash",
+            "id",
+            "git",
+            "curl",
+            "gcc",
+            "make",
+            "pkg-config",
+            "python3",
+            "shellcheck",
+            "shfmt",
+            "realpath",
+            "find",
+            "grep",
+            "uv",
+            "just",
+            "docker",
+            "virsh",
+            "/usr/bin/qemu-system-x86_64",
+            "/usr/bin/qemu-kvm",
+            "/usr/libexec/qemu-kvm",
+        )
+    }
+    | {
+        f"Toolchain operator missing {group} group; re-prepare": (
+            f"Toolchain operator missing {group} group; restore toolchain or re-prepare"
+        )
+        for group in ("docker", "kvm", "libvirt")
+    }
+    | {
+        "Toolchain required packages failed; inspect guest prerequisites and re-prepare": (
+            "Toolchain required packages unavailable; restore toolchain or re-prepare"
+        ),
+        "Toolchain required packages missing; re-prepare": (
+            "Toolchain required packages unavailable; restore toolchain or re-prepare"
+        ),
+        "Toolchain QEMU missing; re-prepare": (
+            "Toolchain QEMU unavailable; restore toolchain or re-prepare"
+        ),
+    }
+)
+
+
+def toolchain_packages(profile):
+    return "bash coreutils findutils grep git curl ca-certificates".split() + (
+        TOOLCHAIN_PACKAGES[profile].split()
+    )
+
+
+def toolchain_command(argv, operation, timeout=60):
+    try:
+        return command(argv, timeout=timeout)
+    except GuestError:
+        raise GuestError(
+            f"Toolchain {operation} failed; inspect guest prerequisites and re-prepare"
+        ) from None
+
+
+def operator_command(user, argv, timeout=60):
+    return toolchain_command(
+        ["runuser", "--login", user, "--shell", "/bin/bash", "--command", shlex.join(argv)],
+        f"operator {argv[0]}",
+        timeout,
+    )
+
+
+def toolchain_login_check(bash, groups):
+    check(bool(re.fullmatch(r"[0-9]+\.[0-9]+", bash)), "Toolchain Bash version unavailable")
+    check(tuple(map(int, bash.split("."))) >= (4, 4), "Toolchain Bash must be at least 4.4")
+    for group in ("docker", "kvm", "libvirt"):
+        check(group in groups.split(), f"Toolchain operator missing {group} group; re-prepare")
+
+
+def toolchain_source_path(account, prepare=False):
+    home = Path(account.pw_dir)
+    check(
+        account.pw_uid != 0 and home.is_absolute() and home != Path("/"),
+        "Unsafe toolchain operator home/account; select a non-root operator",
+    )
+    for path in (*reversed(home.parents), home, home / "src"):
+        if path == home / "src" and prepare and not path.exists() and not path.is_symlink():
+            path.mkdir(mode=0o755)
+            os.chown(path, account.pw_uid, account.pw_gid)
+        info = path.lstat()
+        check(stat.S_ISDIR(info.st_mode), "Toolchain path is a symlink or not a directory")
+        owned = path in (home, home / "src")
+        check(info.st_uid == (account.pw_uid if owned else 0), "Toolchain path ownership differs")
+        if owned and prepare:
+            path.chmod(stat.S_IMODE(info.st_mode) & ~0o022)
+        else:
+            check(
+                not info.st_mode & 0o022, "Toolchain path is writable by group/others; repair modes"
+            )
+
+
+def toolchain_package_hash(profile):
+    argv = (
+        ["dpkg-query", "-W", "-f=${binary:Package}\t${Version}\t${db:Status-Status}\n"]
+        if profile == "ubuntu"
+        else ["rpm", "-qa", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n"]
+    )
+    rows = toolchain_command(argv, "package inventory").splitlines()
+    if profile == "ubuntu":
+        rows = [row for row in rows if row.endswith("\tinstalled")]
+    return hashlib.sha256(("\n".join(sorted(rows)) + "\n").encode()).hexdigest()
+
+
+def toolchain_check_packages(profile):
+    packages = toolchain_packages(profile)
+    argv = (
+        ["dpkg-query", "-W", "-f=${db:Status-Status}\n", *packages]
+        if profile == "ubuntu"
+        else ["rpm", "-q", "--quiet", *packages]
+    )
+    installed = toolchain_command(argv, "required packages")
+    if profile == "ubuntu":
+        check(
+            installed.splitlines() == ["installed"] * len(packages),
+            "Toolchain required packages missing; re-prepare",
+        )
+
+
+def check_docker_key(output):
+    fingerprints = [row.split(":")[9] for row in output.splitlines() if row.startswith("fpr:")]
+    check(fingerprints == [DOCKER_KEY], "Docker signing key differs; inspect approved source")
+
+
+def prepare_docker_repository():
+    path = Path("/etc/yum.repos.d/docker-ce.repo")
+    check(
+        not path.is_symlink() and (not path.exists() or path.read_text() == DOCKER_REPOSITORY),
+        "Docker repository differs; inspect existing source without replacing it",
+    )
+    toolchain_command(
+        ["dnf", "install", "-y", "gnupg2", "curl", "ca-certificates"],
+        "repository verification prerequisites",
+        600,
+    )
+    with tempfile.TemporaryDirectory(prefix="kdive-docker-key-") as directory:
+        key = str(Path(directory) / "gpg")
+        toolchain_command(
+            [
+                "curl",
+                "--fail",
+                "--location",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                "--output",
+                key,
+                "https://download.docker.com/linux/rhel/gpg",
+            ],
+            "Docker signing key download",
+            120,
+        )
+        check_docker_key(
+            toolchain_command(
+                ["gpg", "--homedir", directory, "--batch", "--show-keys", "--with-colons", key],
+                "Docker signing key",
+            )
+        )
+        toolchain_command(["rpm", "--import", key], "Docker signing key import")
+    path.write_text(DOCKER_REPOSITORY)
+    path.chmod(0o644)
+
+
+def prepare_operator_tools(user, account):
+    home = Path(account.pw_dir)
+    profile = next(
+        (
+            home / name
+            for name in (".bash_profile", ".bash_login", ".profile")
+            if (home / name).exists() or (home / name).is_symlink()
+        ),
+        home / ".profile",
+    )
+    new_profile = not profile.exists()
+    if profile.exists() or profile.is_symlink():
+        info = profile.lstat()
+        check(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == account.pw_uid
+            and not info.st_mode & 0o022,
+            "Unsafe operator login profile; repair ownership/mode",
+        )
+    line = '\nexport PATH="$HOME/.local/bin:$PATH"\n'
+    if not profile.exists() or line.strip() not in profile.read_text():
+        with profile.open("a") as stream:
+            stream.write(line)
+    if new_profile:
+        os.chown(profile, account.pw_uid, account.pw_gid)
+        profile.chmod(0o644)
+    with tempfile.TemporaryDirectory(prefix="kdive-uv-") as directory:
+        installer = Path(directory) / "install.sh"
+        toolchain_command(
+            [
+                "curl",
+                "--fail",
+                "--location",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                "--output",
+                str(installer),
+                f"https://astral.sh/uv/{UV_VERSION}/install.sh",
+            ],
+            "uv installer download",
+            120,
+        )
+        Path(directory).chmod(0o755)
+        installer.chmod(0o644)
+        operator_command(
+            user,
+            [
+                "env",
+                "UV_NO_MODIFY_PATH=1",
+                f"UV_INSTALL_DIR={home}/.local/bin",
+                "sh",
+                str(installer),
+            ],
+            300,
+        )
+    operator_command(user, ["uv", "tool", "install", f"rust-just=={JUST_VERSION}"], 300)
+
+
+def toolchain_observation(request):
+    profile, user = request["host"]["profile"], request["host"]["ansible_user"]
+    toolchain_source_path(pwd.getpwnam(user))
+    toolchain_check_packages(profile)
+    bash = operator_command(
+        user, ["bash", "-c", 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"']
+    )
+    toolchain_login_check(bash, operator_command(user, ["id", "-Gn"]))
+    for tool in ("git", "curl", "gcc", "make", "pkg-config", "python3", "shellcheck", "shfmt"):
+        operator_command(user, [tool, "--version"])
+    for tool in ("realpath", "find", "grep"):
+        check("GNU" in operator_command(user, [tool, "--version"]), f"Toolchain {tool} must be GNU")
+    qemu = shutil.which("qemu-system-x86_64") or shutil.which("qemu-kvm")
+    if qemu is None and Path("/usr/libexec/qemu-kvm").is_file():
+        qemu = "/usr/libexec/qemu-kvm"
+    check(qemu is not None, "Toolchain QEMU missing; re-prepare")
+    operator_command(user, [qemu, "--version"])
+    operator_command(user, ["docker", "compose", "version"])
+    operator_command(user, ["docker", "info"])
+    operator_command(user, ["virsh", "-c", "qemu:///system", "version"])
+    toolchain_command(["systemctl", "is-enabled", "docker.service"], "Docker enablement")
+    toolchain_command(["systemctl", "is-active", "docker.service"], "Docker service")
+    versions = {}
+    for name, argv in (
+        ("uv", ["uv", "--version"]),
+        ("just", ["just", "--version"]),
+        ("docker", ["docker", "version", "--format", "{{.Server.Version}}"]),
+        ("libvirt", ["virsh", "--version"]),
+    ):
+        value = operator_command(user, argv).strip()
+        if name in {"uv", "just"}:
+            parts = value.split()
+            check(len(parts) >= 2 and parts[0] == name, f"Toolchain {name} version invalid")
+            value = parts[1]
+        check(
+            bool(re.fullmatch(r"[A-Za-z0-9.+:~_%-]{1,180}", value)),
+            f"Toolchain {name} version invalid; inspect installed tool",
+        )
+        versions[name] = value
+    return {
+        "distro": profile,
+        "release": request["template"]["image"]["release"],
+        **versions,
+        "packages_sha256": toolchain_package_hash(profile),
+    }
+
+
+def prepare_toolchain(request):
+    profile, user = request["host"]["profile"], request["host"]["ansible_user"]
+    account = pwd.getpwnam(user)
+    toolchain_source_path(account, prepare=True)
+    if profile == "rocky":
+        prepare_docker_repository()
+    packages = toolchain_packages(profile)
+    if profile == "ubuntu":
+        toolchain_command(["apt-get", "update"], "package indexes", 600)
+        argv = [
+            "env",
+            "DEBIAN_FRONTEND=noninteractive",
+            "apt-get",
+            "install",
+            "-y",
+            "--no-install-recommends",
+            *packages,
+        ]
+    elif profile == "opensuse":
+        argv = ["zypper", "--non-interactive", "install", "--no-recommends", *packages]
+    else:
+        argv = ["dnf", "install", "-y", *packages]
+    toolchain_command(argv, f"{profile} package installation", 900)
+    for group in ("docker", "kvm", "libvirt"):
+        toolchain_command(["groupadd", "--force", "--system", group], f"{group} group")
+    toolchain_command(
+        ["usermod", "--append", "--groups", "docker,kvm,libvirt", user], "operator groups"
+    )
+    units = toolchain_command(
+        ["systemctl", "list-unit-files", "virtqemud.socket", "libvirtd.service", "--no-legend"],
+        "libvirt units",
+    )
+    libvirt = (
+        [
+            "virtqemud.socket",
+            "virtnetworkd.socket",
+            "virtstoraged.socket",
+            "virtnodedevd.socket",
+            "virtsecretd.socket",
+            "virtproxyd.socket",
+        ]
+        if "virtqemud.socket" in units
+        else ["libvirtd.service"]
+    )
+    toolchain_command(
+        ["systemctl", "enable", "--now", "docker.service", *libvirt], "runtime services", 120
+    )
+    prepare_operator_tools(user, account)
+    content = toolchain_observation(request)
+    check(
+        content["uv"] == UV_VERSION and content["just"] == JUST_VERSION,
+        "Toolchain pinned uv/just differs; re-prepare",
+    )
+    return content
+
+
+def check_toolchain(request, content):
+    fields = {"distro", "release", "uv", "just", "docker", "libvirt", "packages_sha256"}
+    check(
+        isinstance(content, dict)
+        and set(content) == fields
+        and isinstance(content["packages_sha256"], str)
+        and re.fullmatch(r"[a-f0-9]{64}", content["packages_sha256"]),
+        "Invalid toolchain content",
+    )
+    observed = toolchain_observation(request)
+    for key in fields - {"packages_sha256"}:
+        check(content[key] == observed[key], f"Toolchain {key} differs; restore or re-prepare")
+
+
+LEVELS = (
+    {
+        "name": "toolchain",
+        "parent": "clean",
+        "prepare": prepare_toolchain,
+        "check": check_toolchain,
+    },
+)
 LEVEL_DIRECTORY = Path("/var/lib/kdive-levels")
 
 
@@ -743,6 +1121,7 @@ def run_level(request, operation, name, chain, proposed):
 
 
 def main():
+    envelope = {}
     try:
         envelope = json.loads(sys.stdin.read(65537))
         check(isinstance(envelope, dict), "Invalid guest request")
@@ -763,9 +1142,20 @@ def main():
             )
             result = run(envelope["request"], envelope["fresh"])
         print(json.dumps(result, sort_keys=True))
-    except (GuestError, OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (GuestError, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+        diagnostic = None
+        if (
+            isinstance(error, GuestError)
+            and isinstance(envelope, dict)
+            and set(envelope) == {"request", "level_operation", "level", "chain", "proposed"}
+        ):
+            diagnostic = TOOLCHAIN_DIAGNOSTICS.get(str(error))
         print(
-            "Guest baseline failed; inspect private cloud-init, identity, sizing, security and KVM",
+            diagnostic
+            or (
+                "Guest baseline failed; inspect private cloud-init, identity, "
+                "sizing, security and KVM"
+            ),
             file=sys.stderr,
         )
         return 1
