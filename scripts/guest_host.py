@@ -28,6 +28,21 @@ GuestError = template_host.TemplateError
 check = template_host.check
 native = template_host.native
 command = template_host.command
+
+
+class ReasonError(GuestError):
+    """A refusal whose code the controller maps to its own operator text (ADR 0015)."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def refuse(condition, code, message):
+    if not condition:
+        raise ReasonError(code, message)
+
+
 PVE_NODES = Path("/etc/pve/nodes")
 BASELINE_FIELDS = (
     "vmid",
@@ -161,8 +176,9 @@ def check_capacity(requests, node, memory, storages, source_extents=None):
             for r in requests
             if r["host"]["storage"] == storage
         )
-        check(
+        refuse(
             type(status.get("avail")) is int and status["avail"] >= demand,
+            "storage-insufficient",
             "Insufficient reported storage space; release storage before retry",
         )
     return warnings
@@ -184,8 +200,9 @@ def resource_present(request, resources):
     matches = [r for r in resources if r["vmid"] == h["vmid"]]
     check(len(matches) <= 1, "Ambiguous native guest ID")
     if matches:
-        check(
+        refuse(
             matches[0]["node"] == h["proxmox_node"] and matches[0]["type"] == "qemu",
+            "vmid-in-use",
             "Guest ID belongs to another resource; select an unused ID",
         )
     return bool(matches)
@@ -515,7 +532,7 @@ def admission(requests, mode="apply", level="clean"):
         storages[h["storage"]] = template_host.host_admission(
             dict(t, storage=h["storage"], bridge=h["bridge"], vlan=h.get("vlan"))
         )
-        check(template_host.existing_resource(t), "Selected template is absent")
+        refuse(template_host.existing_resource(t), "template-absent", "Selected template is absent")
         marker_value = "kdive-template-v1:" + template_host.identity(t) + ":ready"
         config = template_host.verify_configuration(t, marker_value, source_storage["extent_bytes"])
         check(config.get("template") == 1, "Selected source is not a ready template")
@@ -530,12 +547,15 @@ def admission(requests, mode="apply", level="clean"):
         return existing
     flags = Path("/proc/cpuinfo").read_text().split()
     module = "kvm_intel" if "vmx" in flags else "kvm_amd" if "svm" in flags else None
-    check(
-        module is not None, "Host virtualization exposure absent; operator must configure nesting"
+    refuse(
+        module is not None,
+        "nesting-disabled",
+        "Host virtualization exposure absent; operator must configure nesting",
     )
     nested = Path(f"/sys/module/{module}/parameters/nested")
-    check(
+    refuse(
         nested.is_file() and nested.read_text().strip().lower() in {"1", "y"},
+        "nesting-disabled",
         "Host nesting disabled; operator must configure it before provisioning",
     )
     guest_verify.kvm_probe()
@@ -551,22 +571,29 @@ def admission(requests, mode="apply", level="clean"):
             else:
                 baseline(request, config, level)
     if mode.endswith("level"):
-        check(all(existing), "Level preparation requires existing owned guests")
+        refuse(all(existing), "guests-missing", "Level preparation requires existing owned guests")
         return existing
     if mode.endswith("restore"):
-        check(all(existing), "Restore requires existing owned guests and clean baseline")
+        refuse(
+            all(existing),
+            "guests-missing",
+            "Restore requires existing owned guests and clean baseline",
+        )
         return existing
     fresh = [r for r, present in zip(requests, existing, strict=True) if not present]
     for r in fresh:
-        check(
+        refuse(
             r["host"]["disk_gib"] * 1024**3
             >= template_host.allocated_size(
                 r["template"]["image"]["virtual_size_bytes"],
                 source_extents[r["host"]["template_vmid"]],
             ),
+            "disk-too-small",
             "Guest root disk cannot shrink the source allocation; increase disk_gib",
         )
-    check(mode != "verify" or all(existing), "Verify requires existing ready guests")
+    refuse(
+        mode != "verify" or all(existing), "guests-missing", "Verify requires existing ready guests"
+    )
     for warning in check_capacity(
         fresh,
         native(f"/nodes/{hosts[0]['proxmox_node']}/status"),
@@ -580,8 +607,9 @@ def admission(requests, mode="apply", level="clean"):
 
 def clone(request):
     h = request["host"]
-    check(
+    refuse(
         not resource_present(request, native("/cluster/resources", "--type", "vm")),
+        "vmid-in-use",
         "Guest ID became occupied; select an unused ID",
     )
     command(
@@ -1047,7 +1075,9 @@ def inspect_removable(request):
     phase = next(
         (p for p in ("ready", "preparing") if config.get("description") == marker(request, p)), None
     )
-    check(phase is not None, "Selected guest ownership differs; teardown refused")
+    refuse(
+        phase is not None, "ownership-differs", "Selected guest ownership differs; teardown refused"
+    )
     config = inspect_guest(request, phase=phase, running=None, seed=False)
     for name in snapshot_rows(request):
         snapshot = native(base_path(request) + "/snapshot/" + name + "/config")
@@ -1211,7 +1241,10 @@ def main():
             envelope["level"],
         )
     except (GuestError, guest_verify.GuestError) as error:
-        print(json.dumps({"error": str(error)}), flush=True)
+        event = {"error": str(error)}
+        if isinstance(error, ReasonError):
+            event["code"] = error.code
+        print(json.dumps(event), flush=True)
         return 1
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         print(
