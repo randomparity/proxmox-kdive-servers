@@ -17,7 +17,7 @@ Replace the Ubuntu image record in vars/images.json with the approved upstream i
 its checksum, size and read-only inspected baseline. Existing template identity hashing
 naturally refuses reuse of old image identities. Use separate private inventory and pins
 for the replacement; preserve the previous guest, template and snapshots stopped.
-The image contains system Python 3.14.3. Use Ubuntu's matching python3-guestfs through the
+The inspected python3 metapackage is 3.14.3. Use Ubuntu's matching python3-guestfs through the
 upstream installer, then prove import using the actual installed lifecycle interpreter.
 Retain scripts/guest_verify.py's setup and installer ownership, clean environment, strict
 main equality guard, loopback backend override and recorded ancestor checks unchanged.

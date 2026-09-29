@@ -253,7 +253,9 @@ class TestGuestVerifier(unittest.TestCase):
             with self.subTest(wrong=wrong), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 files = {
-                    "/etc/os-release": 'ID=ubuntu\nVERSION_ID="24.04"\n',
+                    "/etc/os-release": (
+                        f'ID=ubuntu\nVERSION_ID="{req["template"]["image"]["release"]}"\n'
+                    ),
                     "/proc/cpuinfo": "flags : vmx",
                     "/proc/meminfo": "MemTotal: 4194304 kB\n",
                     "/sys/module/apparmor/parameters/enabled": "Y",
@@ -427,7 +429,7 @@ class TestGuestVerifier(unittest.TestCase):
             "guest_uuid": req["guest_uuid"].upper(),
             "boot_id": "12345678-1234-1234-1234-123456789abd",
             "os_id": "ubuntu",
-            "release": "24.04",
+            "release": req["template"]["image"]["release"],
             "architecture": "x86_64",
             "hostname": "ubuntu",
             "fqdn": req["host"]["fqdn"],

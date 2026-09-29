@@ -312,13 +312,18 @@ removes VMs or volumes; native `qm create` may roll back its own fresh allocatio
 API/SSH/native failures never establish resource absence.
 
 The source image digest identifies the unchanged package baseline. Inspection used
-read-only libguestfs 1.54.1 to verify OS/architecture, EFI fallback boot files, cloud-init
+read-only libguestfs (version recorded per image) to verify OS/architecture, EFI fallback boot files, cloud-init
 NoCloud modules/effective configuration and package tuples. `packages_sha256` hashes
 compact, sorted-key UTF-8 JSON of package objects with `name`, `epoch`, `version`,
 `release`, `arch`, sorted by that tuple. Missing tuple values are empty strings.
 Management package versions and absences are recorded separately. In particular,
 the Ubuntu source lacks `qemu-guest-agent`; downstream preparation owns installing it.
 No security enforcement or package state is changed to manufacture import success.
+
+Ubuntu uses the Ubuntu 26.04 release-20260918 image, with its native Python 3.14 package
+family. Changing from the previous Ubuntu 24.04 pin changes template and guest identities;
+use separately assigned replacement resources and rebuild the snapshot chain. Existing
+captures do not become compatible by editing their metadata.
 
 Import/rerun proof establishes template identity and storage eligibility. Guest
 provisioning below establishes boot, networking, cloud-init and nested KVM.
@@ -715,8 +720,9 @@ these prepared trees and guest writes, not a capacity guarantee.
 The checkout lives at the operator's `~/src/kdive`; mismatching or dirty existing trees are
 preserved and refused. Preparation delegates `just setup` and the upstream local-libvirt
 host play. It requires installed Python 3.14; the upstream play must provide its native
-`guestfs` binding. Ubuntu 24.04 currently lacks that interpreter; the approved first proof
-uses Fedora 44, with Ubuntu proof deferred to the template owner. openSUSE is excluded;
+`guestfs` binding. Ubuntu now selects the supported 26.04 image; its installed proof remains
+pending until the replacement guest completes the cycle. Fedora 44 has a completed proof.
+openSUSE is excluded;
 Rocky has a verified toolchain snapshot; its kernel-source and KDIVE preparation remain unverified.
 
 ```sh
