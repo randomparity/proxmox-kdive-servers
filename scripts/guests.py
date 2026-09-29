@@ -45,7 +45,7 @@ REBOOT_DISCONNECTED = object()
 HOST_REASONS = {
     "vmid-in-use": "guest ID belongs to another resource; inspect it or select an unused vmid",
     "template-absent": "selected template is absent; create it with make templates APPLY=1",
-    "nesting-disabled": "host nested virtualization is disabled; operator must enable it",
+    "nesting-disabled": "host lacks hardware or nested virtualization; operator must enable it",
     "guests-missing": "operation requires existing owned guests; provision them first",
     "ownership-differs": "selected guest ownership differs; teardown refused",
     "storage-insufficient": "insufficient reported storage space; release storage before retry",
