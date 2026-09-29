@@ -1,5 +1,6 @@
 """Management-only preparation and reusable Linux guest baseline verification."""
 
+import configparser
 import errno
 import fcntl
 import hashlib
@@ -578,7 +579,7 @@ TOOLCHAIN_PACKAGES = {
     "fedora": "gcc make pkgconf-pkg-config libvirt-devel python3-devel elfutils-libelf-devel "
     "ShellCheck shfmt libvirt libvirt-client qemu-kvm moby-engine docker-compose",
     "rocky": "gcc make pkgconf-pkg-config libvirt-devel python3-devel elfutils-libelf-devel "
-    "ShellCheck shfmt libvirt libvirt-client qemu-kvm docker-ce docker-ce-cli containerd.io "
+    "ShellCheck libvirt libvirt-client qemu-kvm docker-ce docker-ce-cli containerd.io "
     "docker-buildx-plugin docker-compose-plugin",
     "opensuse": "gcc make pkgconf-pkg-config libvirt-devel python3-devel libelf-devel "
     "ShellCheck shfmt libvirt-daemon-qemu libvirt-daemon-proxy libvirt-client qemu-x86 "
@@ -630,6 +631,9 @@ TOOLCHAIN_DIAGNOSTICS = (
         for group in ("docker", "kvm", "libvirt")
     }
     | {
+        "Toolchain shfmt differs or unavailable; restore toolchain or re-prepare": (
+            "Toolchain shfmt differs or unavailable; restore toolchain or re-prepare"
+        ),
         "Toolchain required packages failed; inspect guest prerequisites and re-prepare": (
             "Toolchain required packages unavailable; restore toolchain or re-prepare"
         ),
@@ -644,9 +648,17 @@ TOOLCHAIN_DIAGNOSTICS = (
 
 
 def toolchain_packages(profile):
-    return "bash coreutils findutils grep git curl ca-certificates".split() + (
+    packages = "bash coreutils findutils grep git curl ca-certificates".split() + (
         TOOLCHAIN_PACKAGES[profile].split()
     )
+    if profile == "rocky":
+        release = platform.release()
+        check(
+            bool(re.fullmatch(r"[0-9][A-Za-z0-9._+-]{0,127}", release)),
+            "Invalid Rocky kernel release; inspect running kernel",
+        )
+        packages.append(f"kernel-modules-extra-{release}")
+    return packages
 
 
 def toolchain_command(argv, operation, timeout=60):
@@ -722,6 +734,137 @@ def toolchain_check_packages(profile):
         )
 
 
+ROCKY_DNF = [
+    "dnf",
+    "--disablerepo=*",
+    "--enablerepo=baseos,appstream,extras,crb",
+    "--setopt=*.gpgcheck=1",
+    "--setopt=*.sslverify=1",
+]
+SHFMT_VERSION = "3.14.1"
+SHFMT_SHA256 = "76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf"
+SHFMT_ERROR = "Toolchain shfmt differs or unavailable; restore toolchain or re-prepare"
+
+
+def check_rocky_repositories(epel=False):
+    packages = ["rocky-repos", "rocky-gpg-keys"] + (["epel-release"] if epel else [])
+    check(
+        not toolchain_command(["rpm", "-V", "--nomtime", *packages], "Rocky source integrity"),
+        "Rocky repository differs; inspect existing source without replacing it",
+    )
+    owned = toolchain_command(["rpm", "-ql", *packages], "Rocky source ownership").splitlines()
+    required = {"baseos", "appstream", "extras", "crb"} | ({"epel"} if epel else set())
+    seen = set()
+    try:
+        for path in Path("/etc/yum.repos.d").glob("*.repo"):
+            parser = configparser.ConfigParser(interpolation=None)
+            parser.read_string(path.read_text())
+            for name in parser.sections():
+                if name == "docker-ce-stable":
+                    check(
+                        path == Path("/etc/yum.repos.d/docker-ce.repo")
+                        and not path.is_symlink()
+                        and path.read_text() == DOCKER_REPOSITORY,
+                        "Docker repository conflict; inspect existing source without replacing it",
+                    )
+                if name in required or name.startswith("epel"):
+                    check(
+                        str(path) in owned
+                        and not path.is_symlink()
+                        and path.is_file()
+                        and name not in seen,
+                        "Rocky repository conflict; inspect existing source without replacing it",
+                    )
+                    seen.add(name)
+    except (OSError, configparser.Error):
+        raise GuestError("Rocky repository unreadable; inspect existing source") from None
+    check(required <= seen, "Rocky repository missing; repair distribution source configuration")
+
+
+def prepare_rocky_repositories():
+    installed = toolchain_command(
+        ["rpm", "-qa", "--qf", "%{NAME}\n", "epel-release"], "EPEL bootstrap inventory"
+    ).strip()
+    check(installed in {"", "epel-release"}, "Unexpected EPEL bootstrap inventory")
+    check_rocky_repositories(epel=bool(installed))
+    if not installed:
+        key = Path("/etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-10")
+        check(
+            not list(Path("/etc/yum.repos.d").glob("epel*.repo"))
+            and not key.exists()
+            and not key.is_symlink(),
+            "EPEL source conflict; inspect existing source without replacing it",
+        )
+        toolchain_command([*ROCKY_DNF, "install", "-y", "epel-release"], "EPEL bootstrap", 600)
+    check_rocky_repositories(epel=True)
+
+
+def check_rocky_shfmt(path):
+    try:
+        info = path.lstat()
+        check(
+            stat.S_ISREG(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o755,
+            SHFMT_ERROR,
+        )
+        with path.open("rb") as stream:
+            check(hashlib.file_digest(stream, "sha256").hexdigest() == SHFMT_SHA256, SHFMT_ERROR)
+    except OSError:
+        raise GuestError(SHFMT_ERROR) from None
+
+
+def prepare_rocky_shfmt():
+    path = Path("/usr/local/bin/shfmt")
+    for parent in reversed(path.parents):
+        info = parent.lstat()
+        check(
+            stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
+            "Unsafe shfmt installation directory; repair ownership/mode",
+        )
+    if path.exists() or path.is_symlink():
+        check_rocky_shfmt(path)
+        return
+    with tempfile.TemporaryDirectory(prefix=".kdive-shfmt-", dir=path.parent) as directory:
+        candidate = Path(directory) / "shfmt"
+        toolchain_command(
+            [
+                "curl",
+                "--fail",
+                "--location",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--tlsv1.2",
+                "--output",
+                str(candidate),
+                f"https://github.com/mvdan/sh/releases/download/v{SHFMT_VERSION}/"
+                f"shfmt_v{SHFMT_VERSION}_linux_amd64",
+            ],
+            "shfmt download",
+            120,
+        )
+        candidate.chmod(0o755)
+        check_rocky_shfmt(candidate)
+        try:
+            os.link(candidate, path)
+        except OSError:
+            raise GuestError(
+                "Cannot install shfmt; inspect existing target without replacing it"
+            ) from None
+
+
+def check_rocky_operator_shfmt(user):
+    check_rocky_shfmt(Path("/usr/local/bin/shfmt"))
+    check(
+        operator_command(user, ["bash", "-c", "command -v shfmt"]).strip()
+        == "/usr/local/bin/shfmt",
+        SHFMT_ERROR,
+    )
+    check(
+        operator_command(user, ["shfmt", "--version"]).strip() == f"v{SHFMT_VERSION}", SHFMT_ERROR
+    )
+
+
 def check_docker_key(output):
     fingerprints = [row.split(":")[9] for row in output.splitlines() if row.startswith("fpr:")]
     check(fingerprints == [DOCKER_KEY], "Docker signing key differs; inspect approved source")
@@ -734,7 +877,7 @@ def prepare_docker_repository():
         "Docker repository differs; inspect existing source without replacing it",
     )
     toolchain_command(
-        ["dnf", "install", "-y", "gnupg2", "curl", "ca-certificates"],
+        [*ROCKY_DNF, "install", "-y", "gnupg2", "curl", "ca-certificates"],
         "repository verification prerequisites",
         600,
     )
@@ -829,6 +972,8 @@ def toolchain_observation(request):
     profile, user = request["host"]["profile"], request["host"]["ansible_user"]
     toolchain_source_path(pwd.getpwnam(user))
     toolchain_check_packages(profile)
+    if profile == "rocky":
+        check_rocky_operator_shfmt(user)
     bash = operator_command(
         user, ["bash", "-c", 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"']
     )
@@ -877,6 +1022,7 @@ def prepare_toolchain(request):
     account = pwd.getpwnam(user)
     toolchain_source_path(account, prepare=True)
     if profile == "rocky":
+        prepare_rocky_repositories()
         prepare_docker_repository()
     packages = toolchain_packages(profile)
     if profile == "ubuntu":
@@ -892,6 +1038,8 @@ def prepare_toolchain(request):
         ]
     elif profile == "opensuse":
         argv = ["zypper", "--non-interactive", "install", "--no-recommends", *packages]
+    elif profile == "rocky":
+        argv = [*ROCKY_DNF, "--enablerepo=epel,docker-ce-stable", "install", "-y", *packages]
     else:
         argv = ["dnf", "install", "-y", *packages]
     toolchain_command(argv, f"{profile} package installation", 900)
@@ -919,6 +1067,8 @@ def prepare_toolchain(request):
     toolchain_command(
         ["systemctl", "enable", "--now", "docker.service", *libvirt], "runtime services", 120
     )
+    if profile == "rocky":
+        prepare_rocky_shfmt()
     prepare_operator_tools(user, account)
     content = toolchain_observation(request)
     check(
