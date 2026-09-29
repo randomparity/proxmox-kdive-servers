@@ -45,6 +45,8 @@ def identity(request):
         overrides["nic_model"] = h["nic_model"]
     if "nic_queues" in h:
         overrides["nic_queues"] = h["nic_queues"]
+    if "cloudinit_snippet_storage" in h:
+        overrides["cloudinit_snippet_storage"] = h["cloudinit_snippet_storage"]
     balloon = h.get("balloon_mib", h["memory_mib"])
     if balloon:
         overrides["balloon_mib"] = balloon

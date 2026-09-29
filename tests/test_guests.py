@@ -140,6 +140,7 @@ class TestGuestHost(unittest.TestCase):
             self.assertEqual(guest_host.desired_config(self.request), expected)
 
     def test_disabled_balloon_preserves_legacy_identity(self):
+        self.host.pop("cloudinit_snippet_storage")
         self.host["balloon_mib"] = 0
         expected = guest_host.template_host.digest(
             {
@@ -153,6 +154,24 @@ class TestGuestHost(unittest.TestCase):
         self.assertEqual(guest_host.identity(self.request), expected)
         self.host.pop("balloon_mib")
         self.assertNotEqual(guest_host.identity(self.request), expected)
+
+    def test_snippet_storage_binds_only_ubuntu_identity(self):
+        with_seed = guest_host.identity(self.request)
+        legacy = copy.deepcopy(self.request)
+        legacy["host"].pop("cloudinit_snippet_storage")
+        expected = guest_host.template_host.digest(
+            {
+                "schema": 1,
+                "management": 1,
+                "template": guest_host.template_host.identity(self.request["template"]),
+                "guest": {k: self.host[k] for k in guest_host.BASELINE_FIELDS}
+                | {"vlan": self.host.get("vlan"), "balloon_mib": self.host["memory_mib"]},
+            }
+        )
+        self.assertEqual(guest_host.identity(legacy), expected)
+        self.assertNotEqual(with_seed, expected)
+        legacy["host"]["cloudinit_snippet_storage"] = "other"
+        self.assertNotIn(guest_host.identity(legacy), {with_seed, expected})
 
     def test_acknowledgement_cannot_mark_another_guest_ready(self):
         expected = {
