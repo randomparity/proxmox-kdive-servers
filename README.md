@@ -459,7 +459,8 @@ RAM evidence reports usable `memory_bytes` and measured `crash_reserved_bytes`
 separately. Allocation proof requires their sum to be at least 90% of configured
 RAM (or the positive balloon target), without changing the image's crash-kernel
 settings. Only the native sysfs reservation counts, capped at 512 MiB and one quarter of configured RAM; their
-sum cannot exceed maximum configured RAM. Missing crash-reservation support counts as
+sum cannot exceed maximum configured RAM. Ubuntu guests allow up to 1 GiB (still at most one
+quarter of RAM) because the Ubuntu kdump tools installed by KDIVE reserve 1 GiB from 32 GiB. Missing crash-reservation support counts as
 zero; malformed or unreadable evidence fails.
 
 Matching ready reruns perform verification only: they do not restart a stopped

@@ -581,6 +581,55 @@ class TestGuestVerifier(unittest.TestCase):
                 {key: value for key, value in observed.items() if key != "crash_reserved_bytes"},
             )
 
+    def test_crash_reservation_cap_is_one_gib_for_ubuntu_only(self):
+        req = request()
+        req["guest_uuid"] = "12345678-1234-1234-1234-123456789abc"
+        req["host"].pop("balloon_mib", None)
+        observed = {
+            "guest_uuid": req["guest_uuid"],
+            "boot_id": "12345678-1234-1234-1234-123456789abd",
+            "os_id": "ubuntu",
+            "release": req["template"]["image"]["release"],
+            "architecture": "x86_64",
+            "hostname": "ubuntu",
+            "fqdn": req["host"]["fqdn"],
+            "ipv4": [req["host"]["ansible_host"]],
+            "cpus": 2,
+            "balloon_driver": True,
+            "filesystem_bytes": 31 * 1024**3,
+            "security": "apparmor-enforcing",
+            "kvm_api": 12,
+            "kvm_create_vm": True,
+        }
+
+        def check(memory_mib, usable, reserved):
+            req["host"]["memory_mib"] = memory_mib
+            guest_verify.validate_observation(
+                req, dict(observed, memory_bytes=usable, crash_reserved_bytes=reserved)
+            )
+
+        # Ubuntu kdump-tools reserves 1 GiB in its 32G-64G range.
+        check(32768, 31805460 * 1024, 1024**3)
+        for memory_mib, usable, reserved in (
+            (32768, 31 * 1024**3 - 1, 1024**3 + 1),
+            (2048, 1536 * 1024**2 - 1, 512 * 1024**2 + 1),
+        ):
+            with (
+                self.subTest(memory_mib=memory_mib, reserved=reserved),
+                self.assertRaisesRegex(guest_verify.GuestError, "memory evidence invalid"),
+            ):
+                check(memory_mib, usable, reserved)
+        req["host"]["profile"] = "fedora"
+        observed.update(os_id="fedora", hostname="ubuntu", security="selinux-enforcing")
+        req["template"]["image"]["release"] = observed["release"]
+        check(32768, 31 * 1024**3 + 512 * 1024**2, 512 * 1024**2)
+        for reserved in (512 * 1024**2 + 1, 1024**3):
+            with (
+                self.subTest(profile="fedora", reserved=reserved),
+                self.assertRaisesRegex(guest_verify.GuestError, "memory evidence invalid"),
+            ):
+                check(32768, 31 * 1024**3, reserved)
+
     def test_crash_reservation_uses_native_sysfs_bytes(self):
         for native, expected in (("0\n", 0), ("268435456\n", 268435456)):
             with patch.object(guest_verify.Path, "read_text", return_value=native):

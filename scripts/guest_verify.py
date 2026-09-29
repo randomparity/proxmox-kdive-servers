@@ -482,11 +482,13 @@ def validate_observation(request, result):
     )
     target = (balloon or host["memory_mib"]) * 1024**2
     usable, reserved = result.get("memory_bytes"), result.get("crash_reserved_bytes")
+    # Ubuntu kdump-tools reserves 1 GiB from 32 GiB of RAM; the operator accepted it for Ubuntu.
+    cap = (1024 if host["profile"] == "ubuntu" else 512) * 1024**2
     check(
         type(usable) is int
         and 0 < usable <= configured
         and type(reserved) is int
-        and 0 <= reserved <= min(512 * 1024**2, configured // 4)
+        and 0 <= reserved <= min(cap, configured // 4)
         and usable + reserved <= configured,
         "Guest memory evidence invalid; inspect usable RAM and native crash reservation",
     )

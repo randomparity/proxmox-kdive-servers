@@ -32,6 +32,11 @@ Ubuntu 26.04 installs uutils coreutils by default. By operator decision on 2026-
 toolchain check accepts `realpath` from GNU or uutils coreutils and rejects any other
 provider; `find` and `grep` must still be GNU.
 
+The Ubuntu kdump tools installed with KDIVE reserve 1 GiB of crash-kernel memory from
+32 GiB of RAM. By operator decision on 2026-09-29, Ubuntu guest readiness accepts a native
+reservation up to the smaller of 1 GiB and a quarter of configured RAM; other profiles keep
+the 512 MiB cap.
+
 ## Considered & rejected
 
 - Keep the old image: verified: vars/images.json at ed3a224 records Ubuntu 24.04 and
@@ -53,6 +58,10 @@ provider; `find` and `grep` must still be GNU.
   uutils provider (`coreutils-from-gnu` requires removing an essential package).
 - GNU-named coreutils first on the operator PATH: judgment: extra shim machinery; the
   operator declined it.
+- Raise the shared 512 MiB crash-reservation cap for every profile: judgment: changes an
+  accepted contract for distributions that do not need it; the operator declined it.
+- Size Ubuntu guests below 32 GiB: judgment: re-provisions and re-captures the whole chain
+  to avoid a distribution default; the operator declined it.
 - Custom user-data as well as network: judgment: replaces the native user and key seeding
   the product already verifies, for no gain.
 
