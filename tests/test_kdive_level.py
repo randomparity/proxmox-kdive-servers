@@ -88,6 +88,33 @@ class KdiveContractTests(unittest.TestCase):
                 )
                 state.assert_not_called()
 
+    def test_prepare_bootstraps_ansible_interpreter_before_host_play(self):
+        for profile, manager in (("ubuntu", "apt-get"), ("fedora", "dnf"), ("rocky", "dnf")):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as temp:
+                req = request()
+                req["host"]["profile"] = profile
+                req["kdive_source"] = INPUTS
+                path = Path(temp)
+                with (
+                    patch.object(g, "KDIVE_STATE", path / "absent-state"),
+                    patch.object(g, "kdive_context", return_value=("operator", None, path)),
+                    patch.object(g, "kdive_tree"),
+                    patch.object(g, "kernel_git", return_value=INPUTS["commit"]),
+                    patch.object(g, "kdive_state"),
+                    patch.object(g, "kdive_configuration", return_value={"kernel_source": temp}),
+                    patch.object(g, "kdive_backend_check"),
+                    patch.object(g, "kdive_stopped"),
+                    patch.object(g, "kdive_command") as run,
+                ):
+                    g.prepare_kdive(req)
+                phases = [call.args[1] for call in run.call_args_list]
+                index = phases.index("ansible-prerequisite")
+                script = run.call_args_list[index].args[2]
+                self.assertIn("sudo -n " + manager + " install", script)
+                self.assertIn("python3-packaging", script)
+                self.assertIn("/usr/bin/python3 -I -B -c 'import packaging'", script)
+                self.assertLess(index, phases.index("host-install"))
+
     def test_native_binding_credentials_are_exact_private_files(self):
         with tempfile.TemporaryDirectory() as temp:
             file = Path(temp) / "dsn"

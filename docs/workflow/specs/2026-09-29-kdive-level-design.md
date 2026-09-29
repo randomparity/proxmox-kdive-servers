@@ -85,3 +85,8 @@ member DSN, without printing it; shell programs carrying credentials travel on s
 Preparation supplies upstream setup with a genuinely fetched `origin/main` and requires
 it to equal the approved exact source pin before setup. A moved main requires another
 source decision, never an automatic pin update or a self-comparison reference.
+
+KDIVE preparation installs `python3-packaging` from the guest's configured repositories
+and checks its import in `/usr/bin/python3` before invoking the host play. This is the
+Ansible pip module's interpreter prerequisite, owned by this integration; it does not
+change the ancestor toolchain package contract or replace upstream installer tasks.

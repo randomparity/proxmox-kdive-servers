@@ -740,3 +740,8 @@ KDIVE preparation fetches genuine upstream `main` into `origin/main` for the ups
 schema guard and requires that ref to equal the explicitly approved source pin. If main
 has advanced, preparation stops for source selection; it never advances the pin or bypasses
 the guard. Verification and restore use recorded installed content without this network check.
+
+KDIVE preparation installs `python3-packaging` from the guest's configured repositories
+and checks its import in `/usr/bin/python3` before invoking the host play. This is the
+Ansible pip module's interpreter prerequisite, owned by this integration; it does not
+change the ancestor toolchain package contract or replace upstream installer tasks.

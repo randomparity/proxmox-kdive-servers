@@ -1462,6 +1462,17 @@ def prepare_kdive(request):
         "uv python find --no-python-downloads --python-preference only-system 3.14",
     )
     kdive_command(request, "setup", "just setup", 7200)
+    package_install = (
+        "sudo -n apt-get install -y --no-install-recommends python3-packaging"
+        if request["host"]["profile"] == "ubuntu"
+        else "sudo -n dnf install -y python3-packaging"
+    )
+    kdive_command(
+        request,
+        "ansible-prerequisite",
+        package_install + "\n/usr/bin/python3 -I -B -c 'import packaging'",
+        600,
+    )
     config = kdive_configuration(request)
     play_inputs = {
         "local_libvirt_host_operator_user": user,
