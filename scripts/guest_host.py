@@ -68,9 +68,15 @@ def validate_request(request):
     check(
         isinstance(request, dict)
         and set(request)
-        in ({"host", "template", "revision"}, {"host", "template", "revision", "kernel_source"}),
+        in (
+            {"host", "template", "revision"},
+            {"host", "template", "revision", "kernel_source"},
+            {"host", "template", "revision", "kdive_source"},
+        ),
         "Invalid guest request",
     )
+    if "kdive_source" in request:
+        guest_verify.kdive_inputs(request["kdive_source"])
     if "kernel_source" in request:
         guest_verify.kernel_inputs(request["kernel_source"])
     validate_host(request["host"])
@@ -761,7 +767,7 @@ def level_exchange(request, config, level, prepare=False):
         chain=chain,
         proposed=proposed,
     )
-    ack = read_line(2500)
+    ack = read_line(guest_verify.KDIVE_TIMEOUT + 700 if prepare and level == "kdive" else 2500)
     if prepare:
         check(isinstance(ack, dict) and "metadata" in ack, "Missing prepared level metadata")
         metadata = ack.pop("metadata")

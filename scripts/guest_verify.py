@@ -1110,6 +1110,403 @@ def prepare_kernel_source(request):
     return content
 
 
+KDIVE_PROJECT = "kdive-level"
+KDIVE_STATE = Path("/var/lib/kdive-levels/kdive-state")
+KDIVE_TIMEOUT = 14400
+KDIVE_DIAGNOSTIC = (
+    "KDIVE level failed; inspect root-private logs in /var/lib/kdive-levels/kdive-state"
+)
+
+
+def kdive_inputs(inputs):
+    check(
+        isinstance(inputs, dict) and set(inputs) == {"repo", "commit"},
+        "KDIVE inputs require HTTPS repo and full commit",
+    )
+    kernel_inputs({"repo": inputs["repo"], "ref": inputs["commit"]})
+    check(
+        isinstance(inputs["commit"], str) and re.fullmatch(r"[a-f0-9]{40}", inputs["commit"]),
+        "KDIVE commit must be 40 lowercase hex characters",
+    )
+
+
+def kdive_context(request):
+    user = request["host"]["ansible_user"]
+    account = pwd.getpwnam(user)
+    toolchain_source_path(account)
+    check(
+        request["host"]["profile"] in {"ubuntu", "fedora", "rocky"},
+        "KDIVE worker unsupported on this distribution; select a supported guest",
+    )
+    return user, account, Path(account.pw_dir) / "src" / "kdive"
+
+
+def kdive_command(request, phase, script, timeout=120):
+    user, account, path = kdive_context(request)
+    check(re.fullmatch(r"[a-z-]+", phase), "Invalid KDIVE operation")
+    env = [
+        "env",
+        "-i",
+        "HOME=" + account.pw_dir,
+        "USER=" + user,
+        "LOGNAME=" + user,
+        "PATH=" + account.pw_dir + "/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "LANG=C.UTF-8",
+        "DOCKER_HOST=unix:///var/run/docker.sock",
+        "COMPOSE_PROJECT_NAME=" + KDIVE_PROJECT,
+        "COMPOSE_FILE=" + str(path / "docker-compose.yml") + ":" + str(KDIVE_STATE / "compose.yml"),
+        "UV_PYTHON_DOWNLOADS=never",
+        "PYTHONDONTWRITEBYTECODE=1",
+    ]
+    argv = [
+        "timeout",
+        "--signal=TERM",
+        "--kill-after=30",
+        str(timeout),
+        "runuser",
+        "--user",
+        user,
+        "--",
+        *env,
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-euo",
+        "pipefail",
+        "-s",
+    ]
+    fd, logfile = tempfile.mkstemp(prefix="kdive-" + phase + "-", suffix=".log", dir=KDIVE_STATE)
+    try:
+        with os.fdopen(fd, "w+") as log:
+            result = subprocess.run(
+                argv,
+                input="cd " + shlex.quote(str(path)) + "\n" + script,
+                text=True,
+                stdout=log,
+                stderr=log,
+                timeout=timeout + 40,
+                check=False,
+            )
+            check(
+                result.returncode == 0,
+                "KDIVE " + phase + " failed; inspect root-private operation log and preserve guest",
+            )
+            log.seek(0)
+            output = log.read(1048577)
+            check(
+                len(output) <= 1048576, "KDIVE operation output exceeds bound; inspect private log"
+            )
+        Path(logfile).unlink()
+        return output
+    except (OSError, subprocess.TimeoutExpired):
+        raise GuestError("KDIVE " + phase + " unavailable/timed out; inspect private log") from None
+
+
+def kdive_tree(request, inputs):
+    kdive_inputs(inputs)
+    user, account, path = kdive_context(request)
+    try:
+        info = path.lstat()
+        git_info = (path / ".git").lstat()
+        check(
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == account.pw_uid
+            and stat.S_ISDIR(git_info.st_mode)
+            and git_info.st_uid == account.pw_uid,
+            "KDIVE checkout must be a real operator-owned Git directory",
+        )
+    except OSError:
+        raise GuestError("KDIVE checkout missing or unsafe; preserve it and inspect") from None
+    args = ["-C", str(path)]
+    check(
+        kernel_git(user, args + ["rev-parse", "--show-toplevel"]) == str(path)
+        and kernel_git(user, args + ["rev-parse", "HEAD"]) == inputs["commit"]
+        and not kernel_git(user, args + ["status", "--porcelain", "--untracked-files=all"]),
+        "KDIVE checkout revision or clean status differs; preserve tree and inspect",
+    )
+
+
+def kdive_configuration(request):
+    user, account, path = kdive_context(request)
+    return {
+        "operator": user,
+        "source": str(path),
+        "kernel_source": str(kernel_path(account)),
+        "project": KDIVE_PROJECT,
+        "witness": "guest-local-disposable",
+        "backend_ports": {"postgres": 5432, "seaweedfs": 8333, "oidc": 8090},
+    }
+
+
+def kdive_override():
+    return "services:\n" + "".join(
+        "  "
+        + name
+        + ':\n    ports: !override\n      - "127.0.0.1:'
+        + str(port)
+        + ":"
+        + str(target)
+        + '"\n'
+        for name, port, target in (
+            ("postgres", 5432, 5432),
+            ("seaweedfs", 8333, 8333),
+            ("oidc", 8090, 8080),
+        )
+    )
+
+
+def kdive_state(prepare=False):
+    if prepare:
+        LEVEL_DIRECTORY.mkdir(mode=0o755, exist_ok=True)
+        KDIVE_STATE.mkdir(mode=0o755)
+        (KDIVE_STATE / "compose.yml").write_text(kdive_override())
+        (KDIVE_STATE / "compose.yml").chmod(0o644)
+    for path in (LEVEL_DIRECTORY, KDIVE_STATE, KDIVE_STATE / "compose.yml"):
+        info = path.lstat()
+        check(
+            info.st_uid == 0 and not info.st_mode & 0o022 and not stat.S_ISLNK(info.st_mode),
+            "KDIVE state ownership/mode differs; inspect without replacing it",
+        )
+    check(
+        (KDIVE_STATE / "compose.yml").read_text() == kdive_override(),
+        "KDIVE loopback backend configuration differs; restore level",
+    )
+
+
+def kdive_backend_check(request, running=False):
+    config = level_json(
+        kdive_command(request, "backend-config", "docker compose config --format json")
+    )
+    for name, target in (("postgres", 5432), ("seaweedfs", 8333), ("oidc", 8080)):
+        ports = config["services"][name].get("ports", [])
+        check(
+            len(ports) == 1
+            and ports[0].get("host_ip") == "127.0.0.1"
+            and ports[0].get("target") == target,
+            "KDIVE backend must publish only guest loopback; inspect local compose inputs",
+        )
+    names = kdive_command(
+        request,
+        "volumes",
+        "docker volume ls --filter label=com.docker.compose.project="
+        + KDIVE_PROJECT
+        + " --format '{{.Name}}'",
+    ).splitlines()
+    check(
+        set(names) == {KDIVE_PROJECT + "_kdive-pgdata", KDIVE_PROJECT + "_kdive-seaweedfs-data"},
+        "KDIVE local backend volumes differ; preserve services and inspect",
+    )
+    for name in names:
+        values = level_json(
+            kdive_command(request, "volume-inspect", "docker volume inspect " + shlex.quote(name))
+        )
+        check(
+            len(values) == 1
+            and values[0].get("Driver") == "local"
+            and not values[0].get("Options")
+            and values[0].get("Labels", {}).get("com.docker.compose.project") == KDIVE_PROJECT,
+            "KDIVE witness storage must be owned guest-local disposable storage",
+        )
+    rows = kdive_command(
+        request,
+        "containers",
+        "docker ps --filter label=com.docker.compose.project="
+        + KDIVE_PROJECT
+        + " --format '{{.ID}}'",
+    ).splitlines()
+    check(
+        bool(rows) == running, "KDIVE backend running state differs; stop owned stack before READY"
+    )
+    if running:
+        values = level_json(
+            kdive_command(
+                request,
+                "container-inspect",
+                "docker inspect " + " ".join(shlex.quote(row) for row in rows),
+            )
+        )
+        for item in values:
+            check(
+                item.get("HostConfig", {}).get("NetworkMode") != "host",
+                "KDIVE backend may not use host networking",
+            )
+            for bindings in item.get("NetworkSettings", {}).get("Ports", {}).values():
+                check(
+                    not bindings
+                    or all(binding.get("HostIp") == "127.0.0.1" for binding in bindings),
+                    "KDIVE running backend is externally published; stop owned stack",
+                )
+
+
+def kdive_stopped(request):
+    kdive_command(
+        request,
+        "daemon-stop-check",
+        'source scripts/live-stack/lib.sh\nremaining=$(daemon_pids)\ntest -z "$remaining"',
+    )
+    for slot in range(1, 9):
+        state = command(
+            [
+                "systemctl",
+                "show",
+                "kdive-live-worker@" + str(slot) + ".service",
+                "--property=ActiveState",
+                "--value",
+            ]
+        ).strip()
+        check(state == "inactive", "KDIVE worker remains active; inspect stop before snapshot")
+
+
+def kdive_witness():
+    path = Path("/etc/kdive/credentials/live-worker-witness.dsn")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        check(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == 0
+            and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_nlink == 1,
+            "KDIVE witness credential ownership differs; preserve and inspect",
+        )
+        check(
+            stream.read(4097)
+            == "postgresql://kdive-witness-member:kdive-witness-local@localhost:5432/kdive\n",
+            "KDIVE witness must use the owned guest-local database; preserve and inspect",
+        )
+
+
+def check_kdive(request, content):
+    check(
+        isinstance(content, dict)
+        and set(content) == {"repo", "kdive_sha", "kernel_commit", "playbook_inputs_sha256"},
+        "Invalid KDIVE content metadata; restore level",
+    )
+    inputs = {"repo": content["repo"], "commit": content["kdive_sha"]}
+    kdive_tree(request, inputs)
+    user, account, path = kdive_context(request)
+    check(
+        kernel_git(user, ["-C", str(kernel_path(account)), "rev-parse", "HEAD"])
+        == content["kernel_commit"],
+        "KDIVE kernel binding differs; re-prepare level",
+    )
+    check(
+        content["playbook_inputs_sha256"]
+        == hashlib.sha256(
+            json.dumps(kdive_configuration(request), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "KDIVE play inputs differ; restore or re-prepare level",
+    )
+    kdive_state()
+    kdive_witness()
+    kdive_stopped(request)
+    kdive_command(request, "host-check", "just check-local-libvirt")
+    check(
+        command(["systemctl", "is-enabled", "kdive-live-worker-lifecycle.socket"]).strip()
+        == "enabled",
+        "KDIVE lifecycle socket must be enabled",
+    )
+    for unit in (
+        "kdive-live-worker@1.service",
+        "kdive-live-worker-lifecycle@contract-probe.service",
+    ):
+        check(
+            command(["systemctl", "show", unit, "--property=LoadState", "--value"]).strip()
+            == "loaded",
+            "KDIVE installed unit missing; restore level",
+        )
+    kdive_backend_check(request)
+
+
+def prepare_kdive(request):
+    inputs = request.get("kdive_source")
+    kdive_inputs(inputs)
+    user, account, path = kdive_context(request)
+    check(
+        not KDIVE_STATE.exists()
+        and not KDIVE_STATE.is_symlink()
+        and not Path("/opt/kdive-live-worker-lifecycle").exists(),
+        "KDIVE installation/state already exists; preserve it and inspect before preparation",
+    )
+    if not path.exists() and not path.is_symlink():
+        kernel_git(user, ["init", "--quiet", str(path)])
+        kernel_git(
+            user,
+            ["-C", str(path), "fetch", "--depth=1", "--", inputs["repo"], inputs["commit"]],
+            900,
+        )
+        kernel_git(user, ["-C", str(path), "checkout", "--quiet", "--detach", "FETCH_HEAD"])
+    kdive_tree(request, inputs)
+    kernel_git(
+        user,
+        [
+            "-C",
+            str(path),
+            "fetch",
+            "--depth=1",
+            "--",
+            inputs["repo"],
+            "refs/heads/main:refs/remotes/origin/main",
+        ],
+        900,
+    )
+    check(
+        kernel_git(user, ["-C", str(path), "rev-parse", "refs/remotes/origin/main"])
+        == inputs["commit"],
+        "KDIVE upstream main differs from approved pin; select and approve a current pin",
+    )
+    kdive_state(prepare=True)
+    kdive_command(
+        request,
+        "admission",
+        'containers=$(docker ps -aq); test -z "$containers"; '
+        'volumes=$(docker volume ls -q); test -z "$volumes"; '
+        "test ! -e .env; test ! -e .live-stack-logs; "
+        "uv python find --no-python-downloads --python-preference only-system 3.14",
+    )
+    kdive_command(request, "setup", "just setup", 7200)
+    package_install = (
+        "sudo -n apt-get install -y --no-install-recommends python3-packaging"
+        if request["host"]["profile"] == "ubuntu"
+        else "sudo -n dnf install -y python3-packaging"
+    )
+    kdive_command(
+        request,
+        "ansible-prerequisite",
+        package_install + "\n/usr/bin/python3 -I -B -c 'import packaging'",
+        600,
+    )
+    config = kdive_configuration(request)
+    play_inputs = {
+        "local_libvirt_host_operator_user": user,
+        "local_libvirt_host_kernel_source": config["kernel_source"],
+    }
+    script = (
+        "export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="
+        "'postgresql://kdive-witness-member:kdive-witness-local@localhost:5432/kdive'\n"
+        "ANSIBLE_CONFIG=deploy/ansible/ansible.cfg uv run --with ansible-core==2.21.1 "
+        "ansible-playbook deploy/ansible/playbooks/local-libvirt-host.yml --become "
+        "--extra-vars " + shlex.quote(json.dumps(play_inputs))
+    )
+    kdive_command(request, "host-install", script, 3600)
+    try:
+        kdive_command(
+            request, "stack-start", "scripts/live-stack/stack-services.sh --skip-obs", 1800
+        )
+        kdive_backend_check(request, running=True)
+    finally:
+        kdive_command(request, "stack-stop", "scripts/live-stack/stack-down.sh", 300)
+        kdive_stopped(request)
+    return {
+        "repo": inputs["repo"],
+        "kdive_sha": inputs["commit"],
+        "kernel_commit": kernel_git(user, ["-C", config["kernel_source"], "rev-parse", "HEAD"]),
+        "playbook_inputs_sha256": hashlib.sha256(
+            json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+
+
 LEVELS = (
     {
         "name": "toolchain",
@@ -1122,6 +1519,12 @@ LEVELS = (
         "parent": "toolchain",
         "prepare": prepare_kernel_source,
         "check": check_kernel_source,
+    },
+    {
+        "name": "kdive",
+        "parent": "kernel-src",
+        "prepare": prepare_kdive,
+        "check": check_kdive,
     },
 )
 LEVEL_DIRECTORY = Path("/var/lib/kdive-levels")
@@ -1325,6 +1728,8 @@ def main():
             and set(envelope) == {"request", "level_operation", "level", "chain", "proposed"}
         ):
             diagnostic = (TOOLCHAIN_DIAGNOSTICS | KERNEL_DIAGNOSTICS).get(str(error))
+            if diagnostic is None and envelope.get("level") == "kdive":
+                diagnostic = KDIVE_DIAGNOSTIC
         print(
             diagnostic
             or (

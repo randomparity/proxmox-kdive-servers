@@ -546,8 +546,9 @@ Snapshots cover VM state only, not external services, DNS, backups or test artif
 The level contract supports an ordered, closed registry above `clean`. The implemented
 `toolchain` level prepares developer headers and tools, Docker Engine with Compose, local
 libvirt/QEMU, and operator `uv`/`just`. Its parent is `clean`. `kernel-src` adds a pinned,
-shallow, detached, unbuilt Linux source checkout above `toolchain`. There is no configurable plugin
-loader or test-level switch.
+shallow, detached, unbuilt Linux source checkout above `toolchain`. `kdive` delegates installation
+to a pinned upstream checkout above `kernel-src`. There is no configurable plugin loader or
+test-level switch.
 
 `LEVEL` defaults to `clean` for `make verify` and `make restore`. Existing clean metadata and
 successful output stay unchanged. A higher level binds its exact native configuration, guest
@@ -678,3 +679,85 @@ Measured root-volume allocation above `toolchain` at READY:
 These are native ZFS `written@toolchain` and `referenced` differences against the
 parent snapshot (1 MiB = 1,048,576 bytes), excluding disk reservations. They measure
 these prepared trees and guest writes, not a capacity guarantee.
+
+### KDIVE installed level
+
+`vars/kdive-source.json` selects an HTTPS repository and full commit for preparation only.
+The checkout lives at the operator's `~/src/kdive`; mismatching or dirty existing trees are
+preserved and refused. Preparation delegates `just setup` and the upstream local-libvirt
+host play. It requires installed Python 3.14; the upstream play must provide its native
+`guestfs` binding. Ubuntu 24.04 currently lacks that interpreter; the approved first proof
+uses Fedora 44, with Ubuntu proof deferred to the template owner. openSUSE is excluded;
+Rocky still requires its missing toolchain prerequisites.
+
+```sh
+make level LEVEL=kdive TARGETS=fedora
+make level LEVEL=kdive TARGETS=fedora APPLY=1 CONFIRM=fedora EXCLUSIVE=1
+# Take the exact no-RAM snapshot only after READY, using its emitted metadata.
+make verify LEVEL=kdive TARGETS=fedora
+make restore LEVEL=kdive TARGETS=fedora APPLY=1 CONFIRM=fedora EXCLUSIVE=1
+```
+
+Preparation requires an exclusive guest with no existing Docker containers/volumes or
+installed KDIVE lifecycle state. It creates an owned disposable local backend project;
+Postgres, SeaweedFS and OIDC publish only on guest loopback. There is no external witness
+DSN input. Captured witness credentials belong only to this disposable guest. Successful
+stop preserves local volumes; it independently verifies no host daemons or workers remain.
+Installer failures retain root-private logs under `/var/lib/kdive-levels/kdive-state` and
+withhold READY. Inspect them privately; they can contain credentials. Automatic retries do
+not replace partial installations, snapshots, or ancestors. Preparation may take up to four
+hours. Any critical ancestor tool-version drift fails verification.
+
+The manifest and snapshot content record `kdive_sha`, `kernel_commit`, repository and a hash
+of non-secret play inputs. Verification also reports the recorded `kdive_sha`; it does not
+compare against a newly selected default. Verification expects the stack stopped, with its
+lifecycle socket enabled. To use the captured deployment after restore, start a clean shell
+as its operator with the same Compose identity and loopback override:
+
+```sh
+cd ~/src/kdive
+env -i HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
+  PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+  DOCKER_HOST=unix:///var/run/docker.sock COMPOSE_PROJECT_NAME=kdive-level \
+  COMPOSE_FILE="$PWD/docker-compose.yml:/var/lib/kdive-levels/kdive-state/compose.yml" \
+  UV_PYTHON_DOWNLOADS=never PYTHONDONTWRITEBYTECODE=1 bash --noprofile --norc
+scripts/live-stack/stack-services.sh --skip-obs
+source scripts/live-stack/env.sh
+export KDIVE_STACK_SKEW_POLICY=strict
+uv run --no-sync python -m pytest \
+  tests/integration/test_live_stack.py::test_viewer_denied_operator_op_over_the_wire \
+  -m live_stack --strict-markers -q
+scripts/live-stack/stack-down.sh
+```
+
+Use this same environment for start and stop; plain upstream commands from another login
+can select different volumes or publications. Require exactly one pass and no skips for this
+bounded real HTTP authorization proof. It is not a nested VM provisioning or kdump proof.
+Before capturing, confirm daemon/worker stop and gracefully shut down the guest.
+Boot the guest before `make verify`; keep the KDIVE stack stopped during verification.
+
+KDIVE preparation fetches genuine upstream `main` into `origin/main` for the upstream setup
+schema guard and requires that ref to equal the explicitly approved source pin. If main
+has advanced, preparation stops for source selection; it never advances the pin or bypasses
+the guard. Verification and restore use recorded installed content without this network check.
+
+KDIVE preparation installs `python3-packaging` from the guest's configured repositories
+and checks its import in `/usr/bin/python3` before invoking the host play. This is the
+Ansible pip module's interpreter prerequisite, owned by this integration; it does not
+change the ancestor toolchain package contract or replace upstream installer tasks.
+
+Fedora 44 native proof used KDIVE commit
+`dffce52ab48227ba7b8807824e1f79bb96dc18f6`. Upstream setup, host installation,
+stack start and clean stop completed. A final systemd template-query defect was corrected;
+the existing manifest and full parent chain were then audited through normal verification
+and the unchanged native stop/READY handshake, without replaying installation. The operator
+captured `kdive` without RAM. Ordinary verification and restore passed, followed by exactly
+one passing HTTP authorization test with zero skips and strict stack revision checking.
+No setup or Ansible step ran after restore. Final verification passed and the guest stopped.
+
+Restore took 90.271 seconds; the test started 41.132 seconds after restore completed, or
+131.402 seconds after restore began (controller-observed test-start marker). Native ZFS
+allocation above `kernel-src` was 6,853.27 MiB written and 6,125.94 MiB additional referenced
+data. These measurements include the explicitly preserved setup attempts and are not a
+minimal clean-install size. The corrected final verifier was proven against that installation;
+the entire fresh-install command was not replayed after the query-only correction.
