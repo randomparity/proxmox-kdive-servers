@@ -1,7 +1,9 @@
 """Installed-level boundaries: real parsing, private execution and stop evidence."""
 
+import ast
 import contextlib
 import copy
+import inspect
 import io
 import json
 import os
@@ -196,3 +198,30 @@ class KdiveContractTests(unittest.TestCase):
         ):
             self.assertEqual(g.main(), 1)
         self.assertEqual(output.getvalue(), g.KDIVE_DIAGNOSTIC + "\n")
+
+    def test_admission_rejects_failed_and_nonempty_docker_enumeration(self):
+        tree = ast.parse(inspect.getsource(g.prepare_kdive))
+        call = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "kdive_command"
+            and isinstance(n.args[1], ast.Constant)
+            and n.args[1].value == "admission"
+        )
+        script = ast.literal_eval(call.args[2])
+        with tempfile.TemporaryDirectory() as temp:
+            for body in ("return 1", "printf existing", 'test "$1" != volume'):
+                with self.subTest(body=body):
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-euo",
+                            "pipefail",
+                            "-c",
+                            "docker() { " + body + "; }; uv() { :; }; " + script,
+                        ],
+                        cwd=temp,
+                    )
+                    self.assertNotEqual(result.returncode, 0)

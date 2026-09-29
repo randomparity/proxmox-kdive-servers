@@ -1438,7 +1438,8 @@ def prepare_kdive(request):
     kdive_command(
         request,
         "admission",
-        'test -z "$(docker ps -aq)"; test -z "$(docker volume ls -q)"; '
+        'containers=$(docker ps -aq); test -z "$containers"; '
+        'volumes=$(docker volume ls -q); test -z "$volumes"; '
         "test ! -e .env; test ! -e .live-stack-logs; "
         "uv python find --no-python-downloads --python-preference only-system 3.14",
     )

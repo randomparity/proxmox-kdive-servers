@@ -733,4 +733,5 @@ scripts/live-stack/stack-down.sh
 Use this same environment for start and stop; plain upstream commands from another login
 can select different volumes or publications. Require exactly one pass and no skips for this
 bounded real HTTP authorization proof. It is not a nested VM provisioning or kdump proof.
-Before capturing or reverifying, confirm daemon/worker stop and leave the guest stopped.
+Before capturing, confirm daemon/worker stop and gracefully shut down the guest.
+Boot the guest before `make verify`; keep the KDIVE stack stopped during verification.
