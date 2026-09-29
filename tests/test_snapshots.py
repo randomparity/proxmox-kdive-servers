@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
@@ -294,6 +295,29 @@ class TestSnapshots(unittest.TestCase):
                 self.fixture.guests.pop(1300, None)
                 self.fixture.snapshots.pop(1300, None)
                 path.unlink(missing_ok=True)
+
+    def test_unreadable_seed_after_destroy_reports_removed_guest(self):
+        for fault in ("symlink", "directory"):
+            with self.subTest(fault=fault):
+                self.execute("apply")
+                path = self.seed_file()
+                content = path.read_bytes()
+                if fault == "symlink":
+                    target = self.fixture.snippets / "target"
+                    target.write_bytes(content)
+                    path.unlink()
+                    path.symlink_to(target)
+                else:
+                    shutil.rmtree(self.fixture.snippets)
+                with self.assertRaisesRegex(
+                    guest_host.GuestError, "^Guest removed; network seed retained"
+                ):
+                    self.execute("teardown", confirmed=True, exclusive=True)
+                self.assertNotIn(1101, self.fixture.guests)
+                if fault == "directory":
+                    self.fixture.snippets.mkdir(mode=0o755)
+                for item in self.fixture.snippets.iterdir():
+                    item.unlink()
 
     def test_selected_teardown(self):
         self.execute("apply")

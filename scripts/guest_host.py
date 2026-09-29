@@ -1089,7 +1089,14 @@ def lifecycle(request, mode, level="clean"):
         "Owned volumes remain after teardown; inspect without broad cleanup",
     )
     if seed:
-        release_seed(request, seed)
+        try:
+            release_seed(request, seed)
+        except (GuestError, OSError) as error:
+            if str(error).startswith("Guest removed"):
+                raise
+            raise GuestError(
+                "Guest removed; network seed retained; inspect the snippet storage"
+            ) from None
     return None
 
 
