@@ -176,8 +176,9 @@ def check_capacity(requests, node, memory, storages, source_extents=None):
             for r in requests
             if r["host"]["storage"] == storage
         )
+        check(type(status.get("avail")) is int, "Invalid native storage status; inspect storage")
         refuse(
-            type(status.get("avail")) is int and status["avail"] >= demand,
+            status["avail"] >= demand,
             "storage-insufficient",
             "Insufficient reported storage space; release storage before retry",
         )

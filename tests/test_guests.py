@@ -99,6 +99,10 @@ class TestGuestHost(unittest.TestCase):
                 {"pool": dict(storage, avail=32 * 1024**3)},
             )
         self.assertEqual(caught.exception.code, "storage-insufficient")
+        for status in [{"extent_bytes": 0}, dict(storage, avail=None), dict(storage, avail=1.0)]:
+            with self.subTest(status=status), self.assertRaises(guest_host.GuestError) as caught:
+                guest_host.check_capacity([self.request], node, memory, {"pool": status})
+            self.assertNotIsInstance(caught.exception, guest_host.ReasonError)
 
     def test_host_main_codes_only_reason_errors(self):
         envelope = {
