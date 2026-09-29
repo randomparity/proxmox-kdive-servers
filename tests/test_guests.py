@@ -1937,6 +1937,99 @@ class TestController(unittest.TestCase):
         ):
             self.assertEqual(len(guests.dispatch(requests, "plan", Path("/unused"))), 2)
 
+    def capacity_stub(self, warnings, error=False):
+        return [
+            str(ROOT / ".venv/bin/python"),
+            "-c",
+            "import json, sys\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from scripts import guest_host\n"
+            "envelope = json.loads(sys.stdin.readline())\n"
+            f"for warning in {warnings!r}:\n"
+            "    print(json.dumps(warning), flush=True)\n"
+            f"if {error!r}:\n"
+            "    print(json.dumps({'error': 'x'}), flush=True)\n"
+            "for r in envelope['requests']:\n"
+            "    print(json.dumps({'vmid': r['host']['vmid'], 'identity': guest_host.identity(r),"
+            " 'phase': 'planned', 'action': 'would-create'}), flush=True)\n"
+            "sys.stdin.read()\n",
+        ]
+
+    def test_capacity_warnings_reach_operator_and_reject_malformed_events(self):
+        cpu = {"phase": "capacity-warning", "resource": "cpu", "requested": 8, "available": 2}
+        memory = dict(cpu, resource="memory", requested=4096, available=1024)
+        req = request()
+        stderr = io.StringIO()
+        with (
+            patch.object(guests, "host_ssh", return_value=self.capacity_stub([cpu, memory])),
+            contextlib.redirect_stderr(stderr),
+        ):
+            self.assertEqual(len(guests.dispatch([req], "plan", Path("/unused"))), 1)
+        node = req["host"]["proxmox_node"]
+        self.assertEqual(
+            stderr.getvalue().splitlines(),
+            [
+                f"Guest capacity warning: node {node} batch requests 8 vCPUs; "
+                "2 logical CPUs observed free; guests may contend for CPU",
+                f"Guest capacity warning: node {node} batch requests 4096 MiB RAM; "
+                "1024 MiB MemAvailable observed; guests may contend for memory",
+            ],
+        )
+        for warnings in [
+            [cpu, cpu],
+            [dict(cpu, extra=1)],
+            [dict(cpu, requested=True, available=0)],
+            [dict(cpu, available=2.0)],
+            [dict(cpu, available=8)],
+            [dict(cpu, available=-1)],
+            [dict(cpu, resource="disk")],
+        ]:
+            with (
+                self.subTest(warnings=warnings),
+                patch.object(guests, "host_ssh", return_value=self.capacity_stub(warnings)),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaisesRegex(ValidationError, "capacity warning"),
+            ):
+                guests.dispatch([req], "plan", Path("/unused"))
+
+    def test_capacity_warnings_from_each_host_group(self):
+        data = load_inventory(ROOT / "inventory/example.yml")
+        for alias in ("fedora", "fedora-install"):
+            data["_meta"]["hostvars"][alias]["proxmox_node"] = "other-node"
+        cpu = {"phase": "capacity-warning", "resource": "cpu", "requested": 8, "available": 2}
+
+        resolved = {}
+        for vmid, node in ((1101, "example-node"), (1102, "other-node")):
+            resolved[vmid] = request()
+            resolved[vmid]["host"].update(vmid=vmid, proxmox_node=node)
+            resolved[vmid]["template"]["node"] = node
+
+        for failing in (False, True):
+            stderr = io.StringIO()
+            with (
+                self.subTest(failing=failing),
+                patch.object(guests, "load_inventory", return_value=data),
+                patch.object(guests.templates, "api_admission"),
+                patch.object(
+                    guests, "request_for", side_effect=lambda host, *_: resolved[host["vmid"]]
+                ),
+                patch.object(
+                    guests,
+                    "host_ssh",
+                    side_effect=lambda host, failing=failing: self.capacity_stub(
+                        [cpu], failing and host["proxmox_node"] == "other-node"
+                    ),
+                ),
+                patch.object(guests.sys, "argv", ["guests.py", "--targets", "ubuntu,fedora"]),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual(guests.main(), 1 if failing else 0)
+            warnings = [
+                line for line in stderr.getvalue().splitlines() if "capacity warning" in line
+            ]
+            self.assertEqual([line.split()[4] for line in warnings], ["example-node", "other-node"])
+
     def test_host_key_pins_are_private_and_never_replaced(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "known_hosts"

@@ -506,6 +506,36 @@ def read_event(process):
     return event
 
 
+def read_admitted(process, host):
+    """Print the host's leading capacity warnings, then return its first result event."""
+    seen = set()
+    while True:
+        event = read_event(process)
+        if not isinstance(event, dict) or event.get("phase") != "capacity-warning":
+            return event
+        require(
+            set(event) == {"phase", "resource", "requested", "available"}
+            and event["resource"] in {"cpu", "memory"} - seen
+            and type(event["requested"]) is int
+            and type(event["available"]) is int
+            and 0 <= event["available"] < event["requested"],
+            "Native guest",
+            "invalid capacity warning",
+        )
+        seen.add(event["resource"])
+        unit, observed, contended = {
+            "cpu": ("vCPUs", "logical CPUs observed free", "CPU"),
+            "memory": ("MiB RAM", "MiB MemAvailable observed", "memory"),
+        }[event["resource"]]
+        print(
+            f"Guest capacity warning: node {host['proxmox_node']} batch requests "
+            f"{event['requested']} {unit}; {event['available']} {observed}; "
+            f"guests may contend for {contended}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def complete_level(process, request, event, mode, known_hosts, level, guest_uuid):
     validate_event(request, event, "levels", level)
     require(
@@ -684,8 +714,12 @@ def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False, leve
                 )
                 process.stdin.flush()
                 outcomes = []
-                for request in requests:
-                    event = read_event(process)
+                for index, request in enumerate(requests):
+                    event = (
+                        read_admitted(process, requests[0]["host"])
+                        if index == 0
+                        else read_event(process)
+                    )
                     if mode.startswith("plan"):
                         phase = "planned"
                     elif mode == "teardown":
