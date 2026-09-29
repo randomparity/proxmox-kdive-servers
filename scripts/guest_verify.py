@@ -775,6 +775,7 @@ def prepare_operator_tools(user, account):
         ),
         home / ".profile",
     )
+    new_profile = not profile.exists()
     if profile.exists() or profile.is_symlink():
         info = profile.lstat()
         check(
@@ -787,8 +788,9 @@ def prepare_operator_tools(user, account):
     if not profile.exists() or line.strip() not in profile.read_text():
         with profile.open("a") as stream:
             stream.write(line)
-    os.chown(profile, account.pw_uid, account.pw_gid)
-    profile.chmod(0o644)
+    if new_profile:
+        os.chown(profile, account.pw_uid, account.pw_gid)
+        profile.chmod(0o644)
     with tempfile.TemporaryDirectory(prefix="kdive-uv-") as directory:
         installer = Path(directory) / "install.sh"
         toolchain_command(

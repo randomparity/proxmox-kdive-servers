@@ -288,6 +288,25 @@ class ToolchainTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "packages prepared"):
                 g.prepare_toolchain({"host": {"profile": "opensuse", "ansible_user": "operator"}})
 
+    def test_operator_profile_preserves_existing_private_mode(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as temp:
+                profile = Path(temp) / ".profile"
+                account = SimpleNamespace(pw_dir=temp, pw_uid=os.getuid(), pw_gid=os.getgid())
+                if existing:
+                    profile.write_text('export PATH="$HOME/.local/bin:$PATH"\n')
+                    profile.chmod(0o600)
+                previous_umask = os.umask(0o077)
+                try:
+                    with patch.object(
+                        g.tempfile, "TemporaryDirectory", side_effect=RuntimeError("profile ready")
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "profile ready"):
+                            g.prepare_operator_tools("operator", account)
+                finally:
+                    os.umask(previous_umask)
+                self.assertEqual(stat.S_IMODE(profile.stat().st_mode), 0o600 if existing else 0o644)
+
     def test_docker_key_fingerprint_exact(self):
         valid = "fpr:::::::::060A61C51B558A7F742B77AAC52FEB6B621E9F35:\n"
         g.check_docker_key(valid)
