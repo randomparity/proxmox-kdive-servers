@@ -1969,9 +1969,9 @@ class TestController(unittest.TestCase):
         self.assertEqual(
             stderr.getvalue().splitlines(),
             [
-                f"Guest capacity warning: node {node} batch requests 8 vCPUs; "
+                f"Guest capacity warning: node {node} new guests request 8 vCPUs; "
                 "2 logical CPUs observed free; guests may contend for CPU",
-                f"Guest capacity warning: node {node} batch requests 4096 MiB RAM; "
+                f"Guest capacity warning: node {node} new guests request 4096 MiB RAM; "
                 "1024 MiB MemAvailable observed; guests may contend for memory",
             ],
         )

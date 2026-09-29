@@ -528,7 +528,7 @@ def read_admitted(process, host):
             "memory": ("MiB RAM", "MiB MemAvailable observed", "memory"),
         }[event["resource"]]
         print(
-            f"Guest capacity warning: node {host['proxmox_node']} batch requests "
+            f"Guest capacity warning: node {host['proxmox_node']} new guests request "
             f"{event['requested']} {unit}; {event['available']} {observed}; "
             f"guests may contend for {contended}",
             file=sys.stderr,

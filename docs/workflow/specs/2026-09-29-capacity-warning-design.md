@@ -38,8 +38,8 @@ warning")`. Because each resource may appear once, at most two warnings are read
 warning after the first per-guest event fails existing shape validation. A valid
 warning prints to stderr:
 
-    Guest capacity warning: node <proxmox_node> batch requests <requested> vCPUs; <available> logical CPUs observed free; guests may contend for CPU
-    Guest capacity warning: node <proxmox_node> batch requests <requested> MiB RAM; <available> MiB MemAvailable observed; guests may contend for memory
+    Guest capacity warning: node <proxmox_node> new guests request <requested> vCPUs; <available> logical CPUs observed free; guests may contend for CPU
+    Guest capacity warning: node <proxmox_node> new guests request <requested> MiB RAM; <available> MiB MemAvailable observed; guests may contend for memory
 
 Every dispatch prints its own warnings, so plan prints once per native host and apply
 prints for the pre-apply plan and again for the locked recheck. Stdout is unchanged.

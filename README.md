@@ -70,7 +70,7 @@ and nested-KVM baseline, captures a no-RAM `clean` snapshot, then boots and veri
 These commands prepare the VMs; KDIVE installation is a separate step.
 
 **Capacity:** the example requests 32 vCPUs, 128 GiB RAM and 1 TiB of guest root
-disks, plus host headroom, templates and auxiliary disks. When the batch's vCPUs or
+disks, plus host headroom, templates and auxiliary disks. When new guests' vCPUs or
 RAM exceed the host's observed free capacity, the plan and the apply print a
 `Guest capacity warning` on stderr naming the node, the request and the observed
 capacity, then proceed: these lab guests are not expected to be fully loaded at the
