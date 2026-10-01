@@ -44,7 +44,8 @@ make level LEVEL=toolchain TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
 
 Environment knobs: `INVENTORY` (default `inventory/example.yml`), `TARGETS` (comma-separated
 aliases; omitted means all only for read-only validation), `APPLY`, `RESUME`, `CONFIRM`,
-`EXCLUSIVE`, `LEVEL` (default `clean`). Offline checks must always pass against the anonymous
+`EXCLUSIVE`, `LEVEL` (default `clean`), `CAPTURE` (default off; `1` on `make level` captures,
+boots and verifies after preparation). Offline checks must always pass against the anonymous
 `inventory/example.yml`; the hook unsets `INVENTORY`/`TARGETS`.
 
 ## Architecture
@@ -79,8 +80,10 @@ Cross-cutting contracts (see the ADRs before changing them):
 - Ownership is marked in the Proxmox VM description (`kdive-template-v1:<identity>:<phase>`,
   `kdive-guest-v1:<identity>:<phase>`). Reruns verify only; drift or partial state is refused
   for operator inspection, never repaired or replaced automatically (ADR 0003).
-- Level snapshots are captured by the operator, never by the tool; the tool emits the exact name and
-  metadata to use (ADR 0007). `lvmthin` storage allows restoring any level (ADR 0013).
+- Level snapshots default to operator capture with emitted name and metadata (ADR 0007).
+  Opt-in `CAPTURE=1` / `--capture` on level preparation captures, boots and verifies under the
+  existing APPLY/CONFIRM/EXCLUSIVE gates (ADR 0016); failures retain state without retries or
+  snapshot replacement/deletion. `lvmthin` storage allows restoring any level (ADR 0013).
 - Image pins and inspected baselines live in `vars/images.json`; kernel and KDIVE source pins in
   `vars/kernel-source.json` and `vars/kdive-source.json`.
 

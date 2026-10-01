@@ -1026,6 +1026,60 @@ def shutdown_guest(request, config, phase="ready", seed=True):
     return stopped
 
 
+def capture_snapshot(request, level, metadata):
+    command(
+        [
+            "qm",
+            "snapshot",
+            str(request["host"]["vmid"]),
+            level,
+            "--vmstate",
+            "0",
+            "--description",
+            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        ],
+        timeout=1800,
+    )
+
+
+def capture_level(request, level, metadata):
+    stopped = inspect_guest(request, running=False)
+    prepare_admission(request, stopped, level)
+    parent = level_metadata_chain(request, stopped, metadata["parent"])[-1]
+    guest_verify.level_metadata(
+        metadata, level, parent, identity(request), metadata["config_sha256"]
+    )
+    capture_snapshot(request, level, metadata)
+    config = inspect_guest(request, running=False)
+    baseline(request, config, level)
+    check(
+        snapshot_rows(request)[level]["description"]
+        == json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+        "Captured level metadata differs from prepared guest",
+    )
+    command(["qm", "start", str(request["host"]["vmid"])], timeout=180)
+    emit(
+        request,
+        "level-boot",
+        guest_uuid=guest_verify.machine_uuid(
+            template_host.properties(config.get("smbios1")).get("uuid")
+        ),
+        level=level,
+        metadata=metadata,
+    )
+    verify_ack(request, read_line(2500), phase="level-boot")
+    command(["qm", "agent", str(request["host"]["vmid"]), "ping"], timeout=60)
+    current = inspect_guest(request)
+    check(
+        normalized_config(current) == normalized_config(config), "Guest changed during level boot"
+    )
+    check(
+        guest_verify.level_equal(level_metadata_chain(request, current, level)[-1], metadata),
+        "Captured level metadata changed during boot",
+    )
+    return current
+
+
 def capture_baseline(request, config):
     check(
         not snapshot_rows(request), "Fresh guest already has snapshots; inspect without replacement"
@@ -1037,19 +1091,7 @@ def capture_baseline(request, config):
         "identity": identity(request),
         "config_sha256": template_host.digest(normalized_config(stopped)),
     }
-    command(
-        [
-            "qm",
-            "snapshot",
-            str(request["host"]["vmid"]),
-            "clean",
-            "--vmstate",
-            "0",
-            "--description",
-            json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-        ],
-        timeout=1800,
-    )
+    capture_snapshot(request, "clean", metadata)
     baseline(request, inspect_guest(request, running=False))
     command(["qm", "start", str(request["host"]["vmid"])], timeout=180)
     config = inspect_guest(request)
@@ -1137,7 +1179,7 @@ def lifecycle(request, mode, level="clean"):
     return None
 
 
-def session(requests, mode, confirmed=False, exclusive=False, level="clean"):
+def session(requests, mode, confirmed=False, exclusive=False, level="clean", capture=False):
     check(
         mode
         in {
@@ -1154,6 +1196,8 @@ def session(requests, mode, confirmed=False, exclusive=False, level="clean"):
         "Invalid guest operation",
     )
     guest_verify.level_chain(level)
+    check(type(capture) is bool, "Invalid capture intent")
+    check(not capture or mode in {"level", "plan-level"}, "Capture is only supported for level")
     check(
         level == "clean" or mode in {"verify", "restore", "plan-restore", "level", "plan-level"},
         "LEVEL is only supported for verify, restore and level",
@@ -1209,12 +1253,16 @@ def session(requests, mode, confirmed=False, exclusive=False, level="clean"):
                     config = capture_baseline(request, config)
             if mode == "level":
                 metadata = level_exchange(request, config, level, prepare=True)
-                emit(request, "snapshot-ready", level=level, metadata=metadata)
-                continue
+                if not capture:
+                    emit(request, "snapshot-ready", level=level, metadata=metadata)
+                    continue
+                config = capture_level(request, level, metadata)
             if level != "clean":
                 level_exchange(request, config, level)
             action = "preserved" if present else "created"
-            if mode == "restore":
+            if capture:
+                action = "captured"
+            elif mode == "restore":
                 action = "restored"
             emit(
                 request,
@@ -1231,7 +1279,7 @@ def main():
         envelope = read_line(30)
         check(
             isinstance(envelope, dict)
-            and set(envelope) == {"requests", "mode", "confirmed", "exclusive", "level"},
+            and set(envelope) == {"requests", "mode", "confirmed", "exclusive", "level", "capture"},
             "Invalid native guest envelope",
         )
         session(
@@ -1240,6 +1288,7 @@ def main():
             envelope["confirmed"],
             envelope["exclusive"],
             envelope["level"],
+            envelope["capture"],
         )
     except (GuestError, guest_verify.GuestError) as error:
         event = {"error": str(error)}

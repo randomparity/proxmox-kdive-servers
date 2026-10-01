@@ -13,7 +13,7 @@ export TARGETS
 endif
 
 LEVEL ?= clean
-export CONFIRM EXCLUSIVE LEVEL
+export CONFIRM EXCLUSIVE LEVEL CAPTURE
 
 .PHONY: setup hooks lint syntax validate templates provision verify restore teardown level test check
 

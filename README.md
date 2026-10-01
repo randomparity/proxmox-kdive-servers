@@ -651,8 +651,26 @@ fallback. Only after stopped-state validation does it print `READY TO SNAPSHOT <
 The operator then captures a no-RAM snapshot using that exact name and the compact JSON
 serialization of `metadata` as its description, through the Proxmox UI or `qm snapshot` with
 `--vmstate 0 --description '<metadata JSON>'`. Start the guest before `make verify LEVEL=<name>`.
-The tool never creates, renames or deletes higher-level snapshots. A failed preparation leaves
-inspectable state and emits no READY; inspect it and restore the parent before another attempt.
+This manual path remains the default. To capture, boot and verify in the same operation:
+
+```sh
+make level LEVEL=toolchain TARGETS=ubuntu CAPTURE=1
+make level LEVEL=toolchain TARGETS=ubuntu CAPTURE=1 APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
+```
+
+`CAPTURE=1` (or `scripts/guests.py --prepare-level --capture`) applies only to level preparation.
+Without `APPLY=1` it is still a read-only plan. Capture uses the same confirmation and exclusive-use
+requirements, checks the stopped guest, creates the selected no-RAM snapshot with the exact compact
+prepared metadata, and reads back the native snapshot before starting the guest. It then verifies
+the new boot and selected level before returning JSON with `action: captured` and snapshot evidence.
+It does not print `READY TO SNAPSHOT` on this path. See [ADR 0016](docs/adr/0016-optional-level-snapshot-capture.md).
+
+The tool never renames, deletes or replaces higher-level snapshots, and never retries capture
+automatically. A failure emits no success and leaves partial state inspectable. After shutdown,
+a capture/readback failure retains the stopped guest; a later verification failure can leave it
+running with a retained snapshot.
+Inspect both guest and snapshots before explicitly restoring the parent and deciding whether to
+remove a partial target snapshot. Re-running preparation refuses an existing target snapshot.
 The current parent plus content checks prove the declared contract, not every unrelated disk byte.
 
 Restore admits native chain metadata before stopping or rolling back, so a stopped guest or a

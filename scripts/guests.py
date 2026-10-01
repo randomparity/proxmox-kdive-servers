@@ -414,6 +414,7 @@ def validate_event(request, event, phase, level="clean"):
         "prepared": {"fresh", "guest_uuid"},
         "levels": {"guest_uuid", "level", "prepare", "chain", "proposed"},
         "snapshot-ready": {"level", "metadata"},
+        "level-boot": {"guest_uuid", "level", "metadata"},
         "reboot": {"guest_uuid"},
         "baseline-boot": {"guest_uuid"},
         "removed": {"action", "duration_seconds"},
@@ -437,7 +438,7 @@ def validate_event(request, event, phase, level="clean"):
         "Native guest",
         "result identity/shape mismatch; inspect selected resources",
     )
-    if phase in {"levels", "snapshot-ready"}:
+    if phase in {"levels", "snapshot-ready", "level-boot"}:
         validate_level_event(request, event, level)
         return
     if phase == "prepared":
@@ -455,7 +456,7 @@ def validate_event(request, event, phase, level="clean"):
                 "absent",
                 "would-prepare-level",
             },
-            "ready": {"preserved", "created", "restored"},
+            "ready": {"preserved", "created", "restored", "captured"},
             "removed": {"destroyed", "absent"},
         }[phase]
         require(event["action"] in allowed, "Native guest", "invalid action result")
@@ -551,7 +552,7 @@ def read_admitted(process, host):
         )
 
 
-def complete_level(process, request, event, mode, known_hosts, level, guest_uuid):
+def complete_level(process, request, event, mode, known_hosts, level, guest_uuid, capture=False):
     validate_event(request, event, "levels", level)
     require(
         event["guest_uuid"] == guest_uuid and event["prepare"] == (mode == "level"),
@@ -596,7 +597,7 @@ def complete_level(process, request, event, mode, known_hosts, level, guest_uuid
     process.stdin.flush()
     result = read_event(process)
     if mode == "level":
-        validate_event(request, result, "snapshot-ready", level)
+        validate_event(request, result, "level-boot" if capture else "snapshot-ready", level)
         require(
             guest_verify.level_equal(result["metadata"], response["metadata"]),
             "Native level",
@@ -608,7 +609,7 @@ def complete_level(process, request, event, mode, known_hosts, level, guest_uuid
 def validate_level_event(request, event, level):
     entries = guest_verify.level_chain(level)
     require(entries and event["level"] == level, "Native level", "unexpected selected level")
-    if event["phase"] == "snapshot-ready":
+    if event["phase"] in {"snapshot-ready", "level-boot"}:
         metadata = event["metadata"]
         require(
             isinstance(metadata, dict) and metadata.get("level") == level,
@@ -653,7 +654,7 @@ def validate_level_event(request, event, level):
         require(event["proposed"] is None, "Native level", "unexpected proposed metadata")
 
 
-def complete_guest(process, request, event, mode, known_hosts, level="clean"):
+def complete_guest(process, request, event, mode, known_hosts, level="clean", capture=False):
     require(not event["fresh"] or mode == "apply", "Native guest", "unexpected mutation")
     guest_uuid, fresh = event["guest_uuid"], event["fresh"]
     observations = verify_guest(request, known_hosts, fresh, guest_uuid, booting=mode == "restore")
@@ -693,16 +694,43 @@ def complete_guest(process, request, event, mode, known_hosts, level="clean"):
         event = read_event(process)
     if level != "clean":
         level_event = event
-        event = complete_level(process, request, event, mode, known_hosts, level, guest_uuid)
-        if level == "kdive" and mode != "level":
+        event = complete_level(
+            process, request, event, mode, known_hosts, level, guest_uuid, capture
+        )
+        if capture:
+            metadata = event["metadata"]
+            require(event["guest_uuid"] == guest_uuid, "Native level", "capture boot UUID changed")
+            observations = verify_guest(
+                request, known_hosts, False, guest_uuid, after_boot=observations["boot_id"]
+            )
+            process.stdin.write((json.dumps(dict(ack, phase="level-boot")) + "\n").encode())
+            process.stdin.flush()
+            level_event = read_event(process)
+            validate_event(request, level_event, "levels", level)
+            require(
+                guest_verify.level_equal(level_event["chain"][-1], metadata),
+                "Native level",
+                "captured verification metadata differs from prepared guest",
+            )
+            event = complete_level(
+                process, request, level_event, "verify", known_hosts, level, guest_uuid
+            )
+            require(
+                event.get("snapshot_identity") == guest_host.template_host.digest(metadata),
+                "Native level",
+                "captured evidence differs from prepared guest",
+            )
+        if level == "kdive" and (mode != "level" or capture):
             observations["kdive_sha"] = level_event["chain"][-1]["content"]["kdive_sha"]
-    if mode != "level":
+    if mode != "level" or capture:
         validate_event(request, event, "ready", level)
     observations.pop("boot_id")
     return event, observations
 
 
-def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False, level="clean"):
+def dispatch(
+    requests, mode, known_hosts, confirmed=False, exclusive=False, level="clean", capture=False
+):
     argv = host_ssh(requests[0]["host"])
     try:
         with subprocess.Popen(
@@ -722,6 +750,7 @@ def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False, leve
                                 "confirmed": confirmed,
                                 "exclusive": exclusive,
                                 "level": level,
+                                "capture": capture,
                             }
                         )
                         + "\n"
@@ -745,9 +774,9 @@ def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False, leve
                     observations = {}
                     if phase == "prepared":
                         event, observations = complete_guest(
-                            process, request, event, mode, known_hosts, level
+                            process, request, event, mode, known_hosts, level, capture
                         )
-                    if mode == "level":
+                    if mode == "level" and not capture:
                         outcomes.append({"level": level, "metadata": event["metadata"]})
                         continue
                     require(
@@ -759,6 +788,7 @@ def dispatch(requests, mode, known_hosts, confirmed=False, exclusive=False, leve
                             "plan-teardown": {"would-destroy", "absent"},
                             "apply": {"created", "preserved"},
                             "verify": {"preserved"},
+                            "level": {"captured"},
                             "restore": {"restored"},
                             "teardown": {"destroyed", "absent"},
                         }[mode],
@@ -808,6 +838,7 @@ def main():
     operation.add_argument("--restore", action="store_true")
     operation.add_argument("--teardown", action="store_true")
     operation.add_argument("--prepare-level", action="store_true")
+    parser.add_argument("--capture", action="store_true", default=os.environ.get("CAPTURE") == "1")
     parser.add_argument("--level", default=os.environ.get("LEVEL", "clean"))
     parser.add_argument("--confirm", default=os.environ.get("CONFIRM"))
     parser.add_argument(
@@ -828,6 +859,7 @@ def main():
             "level",
             "select an implemented non-clean level",
         )
+        require(not args.capture or args.prepare_level, "capture", "capture only applies to level")
         destructive = args.restore or args.teardown or args.prepare_level
         require(
             not (destructive and args.apply) or args.confirm == args.targets and args.exclusive,
@@ -880,7 +912,11 @@ def main():
         if mode in {"apply", "restore", "teardown", "level"}:
             for requests in groups.values():
                 dispatch(
-                    requests, "plan-" + mode if destructive else "plan", pins, level=args.level
+                    requests,
+                    "plan-" + mode if destructive else "plan",
+                    pins,
+                    level=args.level,
+                    capture=args.capture,
                 )
         for requests in groups.values():
             for index, result in enumerate(
@@ -891,9 +927,10 @@ def main():
                     confirmed=args.confirm == args.targets,
                     exclusive=args.exclusive,
                     level=args.level,
+                    capture=args.capture,
                 )
             ):
-                if mode == "level":
+                if mode == "level" and not args.capture:
                     alias = next(
                         a
                         for a in args.targets.split(",")
