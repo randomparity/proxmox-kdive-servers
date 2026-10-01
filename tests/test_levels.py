@@ -478,7 +478,9 @@ class TestLevelController(unittest.TestCase):
             "evidence",
         ):
             with self.subTest(fault=fault):
-                events = copy.deepcopy([prepared, preparation, boot, verification, ready])
+                events = [
+                    copy.deepcopy(e) for e in (prepared, preparation, boot, verification, ready)
+                ]
                 if fault == "metadata":
                     events[2]["metadata"]["content"] = {"marker": "wrong"}
                 elif fault == "uuid":
@@ -525,6 +527,8 @@ class TestLevelController(unittest.TestCase):
                             guests.dispatch(
                                 [req], "level", Path("/unused"), True, True, "tools", True
                             )
+                        if fault == "chain":
+                            self.assertEqual(verify.call_count, 2)
                     else:
                         result = guests.dispatch(
                             [req], "level", Path("/unused"), True, True, "tools", True
