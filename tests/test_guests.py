@@ -111,6 +111,7 @@ class TestGuestHost(unittest.TestCase):
             "confirmed": False,
             "exclusive": False,
             "level": "clean",
+            "capture": False,
         }
         for error, expected in [
             (
@@ -1190,6 +1191,9 @@ class GuestNativeFixture:
                         for k, v in guest["config"].items()
                         if k not in {"digest", "description"}
                     },
+                    **(
+                        {"parent": guest["config"]["parent"]} if "parent" in guest["config"] else {}
+                    ),
                     "description": argv[argv.index("--description") + 1],
                     "snaptime": 123456,
                     "vmstate": 0,

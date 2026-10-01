@@ -172,7 +172,7 @@ class TestLevelSnapshots(unittest.TestCase):
         rows[name]["snaptime"] = rows[parent]["snaptime"] + 1
         return value
 
-    def prepare_events(self, fault=None):
+    def prepare_events(self, fault=None, capture=False):
         output = io.StringIO()
         command = guest_host.command
 
@@ -184,18 +184,39 @@ class TestLevelSnapshots(unittest.TestCase):
                 "verified": True,
                 "phase": event["phase"],
             }
-            if event["phase"] == "levels":
+            if event["phase"] == "levels" and event["prepare"]:
                 if fault == "ack":
                     ack["verified"] = False
                 ack["metadata"] = dict(event["proposed"], content={"marker": "ready"})
                 if fault == "config":
                     self.fixture.guests[1101]["config"]["cores"] = 9
+            if event["phase"] == "levels" and not event["prepare"] and fault == "verify":
+                ack["verified"] = False
             return ack
 
         def native(argv, **kwargs):
             if argv[:2] == ["qm", "shutdown"] and fault == "shutdown":
                 raise guest_host.GuestError("shutdown failed")
+            if argv[:2] == ["qm", "snapshot"]:
+                self.assertEqual(self.fixture.guests[1101]["status"], "stopped")
+                self.assertNotIn('"ready"', output.getvalue())
+                if fault == "capture":
+                    raise guest_host.GuestError("capture failed")
+            if argv[:2] == ["qm", "start"] and fault == "start":
+                raise guest_host.GuestError("start failed")
             result = command(argv, **kwargs)
+            if argv[:2] == ["qm", "snapshot"]:
+                row = self.fixture.snapshots[1101]["tools"]
+                if fault == "description":
+                    metadata = json.loads(row["description"])
+                    metadata["content"] = {"marker": "different"}
+                    row["description"] = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+                elif fault == "ram":
+                    row["vmstate"] = 1
+                elif fault == "snapshot-config":
+                    row["config"]["cores"] = 9
+                elif fault == "partial-capture":
+                    raise guest_host.GuestError("capture response lost")
             if argv[:2] == ["qm", "shutdown"]:
                 self.assertNotIn('"snapshot-ready"', output.getvalue())
             return result
@@ -208,10 +229,84 @@ class TestLevelSnapshots(unittest.TestCase):
         ):
             if fault:
                 with self.assertRaises(ValueError):
-                    guest_host.session([self.req], "level", True, True, "tools")
+                    guest_host.session([self.req], "level", True, True, "tools", capture=capture)
             else:
-                guest_host.session([self.req], "level", True, True, "tools")
+                guest_host.session([self.req], "level", True, True, "tools", capture=capture)
         return [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_optional_capture_verifies_before_success(self):
+        events = self.prepare_events(capture=True)
+        self.assertEqual(
+            [e["phase"] for e in events], ["prepared", "levels", "level-boot", "levels", "ready"]
+        )
+        self.assertEqual(events[-1]["action"], "captured")
+        self.assertEqual(self.fixture.guests[1101]["status"], "running")
+        commands = [c for c in self.fixture.calls if c[:2] == ["qm", "snapshot"]]
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][3:6], ["tools", "--vmstate", "0"])
+        self.assertEqual(
+            commands[0][-1],
+            json.dumps(events[2]["metadata"], sort_keys=True, separators=(",", ":")),
+        )
+        self.assertFalse(events[3]["prepare"])
+        self.assertEqual(events[3]["chain"][-1], events[2]["metadata"])
+
+    def test_capture_failures_retain_state_without_success_or_retry(self):
+        guests_saved = copy.deepcopy(self.fixture.guests)
+        snapshots_saved = copy.deepcopy(self.fixture.snapshots)
+        for fault in (
+            "ack",
+            "config",
+            "shutdown",
+            "capture",
+            "partial-capture",
+            "description",
+            "ram",
+            "snapshot-config",
+            "start",
+            "verify",
+        ):
+            with self.subTest(fault=fault):
+                self.fixture.guests = copy.deepcopy(guests_saved)
+                self.fixture.snapshots = copy.deepcopy(snapshots_saved)
+                events = self.prepare_events(fault, capture=True)
+                self.assertFalse(any(e["phase"] in {"ready", "snapshot-ready"} for e in events))
+                commands = [c[1] for c in self.fixture.calls if c[0] == "qm"]
+                self.assertLessEqual(commands.count("snapshot"), 1)
+                self.assertNotIn("delsnapshot", commands)
+                self.assertNotIn("rollback", commands)
+                if fault in {"partial-capture", "description", "ram", "snapshot-config", "start"}:
+                    self.assertIn("tools", self.fixture.snapshots[1101])
+                    self.assertEqual(self.fixture.guests[1101]["status"], "stopped")
+                if fault in {"description", "ram", "snapshot-config", "partial-capture"}:
+                    self.assertNotIn("start", commands)
+                if fault == "verify":
+                    self.assertEqual(self.fixture.guests[1101]["status"], "running")
+                    self.assertIn("tools", self.fixture.snapshots[1101])
+
+    def test_capture_plan_and_intent_refusals(self):
+        self.fixture.calls.clear()
+        self.execute("plan-level", level="tools", capture=True)
+        self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
+        for mode, confirmed, exclusive, capture in (
+            ("level", False, True, True),
+            ("level", True, False, True),
+            ("verify", True, True, True),
+            ("apply", True, True, True),
+            ("plan-level", False, False, 1),
+        ):
+            with (
+                self.subTest(mode=mode, capture=capture),
+                patch.object(guest_host, "native") as native,
+            ):
+                with self.assertRaises(ValueError):
+                    guest_host.session([self.req], mode, confirmed, exclusive, "tools", capture)
+                native.assert_not_called()
+        self.capture("tools", "clean")
+        self.fixture.calls.clear()
+        with self.assertRaises(ValueError):
+            guest_host.session([self.req], "level", True, True, "tools", True)
+        self.assertFalse(any(c[0] == "qm" for c in self.fixture.calls))
 
     def test_ready_only_after_shutdown_never_captures(self):
         events = self.prepare_events()
@@ -334,6 +429,148 @@ class TestLevelController(unittest.TestCase):
             rpc.side_effect = ValueError("failed hook")
             with self.assertRaises(ValueError):
                 guests.dispatch([req], "level", Path("/unused"), True, True, "tools")
+
+    def test_capture_controller_exchange_and_failure_boundaries(self):
+        from tests.test_guests import request
+
+        req = request()
+        uuid = "12345678-1234-1234-1234-123456789abc"
+        base = {"vmid": req["host"]["vmid"], "identity": guest_host.identity(req)}
+        clean = {"schema": 1, "identity": base["identity"], "config_sha256": "b" * 64}
+        metadata = dict(
+            clean,
+            level="tools",
+            parent="clean",
+            parent_identity=guest_host.template_host.digest(clean),
+            content={},
+        )
+        prepared = dict(base, phase="prepared", fresh=False, guest_uuid=uuid)
+        preparation = dict(
+            base,
+            phase="levels",
+            guest_uuid=uuid,
+            level="tools",
+            prepare=True,
+            chain=[clean],
+            proposed=metadata,
+        )
+        boot = dict(base, phase="level-boot", guest_uuid=uuid, level="tools", metadata=metadata)
+        verification = dict(preparation, prepare=False, chain=[clean, metadata], proposed=None)
+        ready = dict(
+            base,
+            phase="ready",
+            action="captured",
+            config_sha256="a" * 64,
+            duration_seconds=1,
+            snapshot="tools",
+            snapshot_time=1,
+            snapshot_identity=guest_host.template_host.digest(metadata),
+            snapshot_config_sha256="b" * 64,
+        )
+        for fault in (
+            None,
+            "metadata",
+            "uuid",
+            "chain",
+            "verify",
+            "boot",
+            "early-ready",
+            "evidence",
+        ):
+            with self.subTest(fault=fault):
+                events = [
+                    copy.deepcopy(e) for e in (prepared, preparation, boot, verification, ready)
+                ]
+                if fault == "metadata":
+                    events[2]["metadata"]["content"] = {"marker": "wrong"}
+                elif fault == "uuid":
+                    events[2]["guest_uuid"] = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+                elif fault == "chain":
+                    events[3]["chain"][-1]["content"] = {"marker": "wrong"}
+                elif fault == "early-ready":
+                    events[2] = ready
+                elif fault == "evidence":
+                    events[-1]["snapshot_identity"] = "0" * 64
+                source = (
+                    "import sys,json;envelope=json.loads(sys.stdin.readline());"
+                    "assert envelope['capture'] is True;"
+                    "events=json.loads(" + repr(json.dumps(events)) + ");"
+                    "\nfor event in events:\n print(json.dumps(event),flush=True)"
+                    "\n if event['phase'] != 'ready':"
+                    "\n  ack=json.loads(sys.stdin.readline());assert ack['verified']"
+                )
+
+                def rpc(request, pins, envelope, timeout, failure=fault):
+                    if envelope["level_operation"] == "prepare":
+                        return {"metadata": metadata}
+                    if failure == "verify":
+                        raise ValueError("level verification failed")
+                    return {"verified": True}
+
+                with (
+                    patch.object(guest_verify, "LEVELS", (entry(),)),
+                    patch.object(
+                        guests, "host_ssh", return_value=[sys.executable, "-u", "-c", source]
+                    ),
+                    patch.object(
+                        guests,
+                        "verify_guest",
+                        side_effect=[
+                            {"boot_id": "prior"},
+                            ValueError("boot failed") if fault == "boot" else {"boot_id": "next"},
+                        ],
+                    ) as verify,
+                    patch.object(guests, "guest_rpc", side_effect=rpc),
+                ):
+                    if fault:
+                        with self.assertRaises(ValueError):
+                            guests.dispatch(
+                                [req], "level", Path("/unused"), True, True, "tools", True
+                            )
+                        if fault == "chain":
+                            self.assertEqual(verify.call_count, 2)
+                    else:
+                        result = guests.dispatch(
+                            [req], "level", Path("/unused"), True, True, "tools", True
+                        )
+                        self.assertEqual(result[0]["action"], "captured")
+                        self.assertEqual(result[0]["snapshot"], "tools")
+                        self.assertEqual(verify.call_args.kwargs["after_boot"], "prior")
+
+    def test_cli_capture_gates_before_remote_access(self):
+        for arguments in (
+            ["--capture"],
+            ["--verify", "--capture"],
+            ["--prepare-level", "--level", "toolchain", "--capture", "--apply"],
+            [
+                "--prepare-level",
+                "--level",
+                "toolchain",
+                "--capture",
+                "--apply",
+                "--confirm",
+                "ubuntu",
+            ],
+            [
+                "--prepare-level",
+                "--level",
+                "toolchain",
+                "--capture",
+                "--apply",
+                "--exclusive",
+                "--confirm",
+                "fedora",
+            ],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(sys, "argv", ["guests", "--targets", "ubuntu", *arguments]),
+                patch.object(guests, "load_inventory") as inventory,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(guests.main(), 1)
+                inventory.assert_not_called()
 
     def test_cli_refuses_invalid_level_without_remote_access(self):
         for arguments in (
