@@ -38,6 +38,7 @@ mutation requires explicit flags:
 ```sh
 make templates|provision|verify|level|restore|teardown   # read-only plan / check
 make provision APPLY=1
+make kdive-install-proof  # one clean-only alias; requires pinned controller checkout/bundle/output
 make restore  APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1     # destructive ops also need CONFIRM+EXCLUSIVE
 make level LEVEL=toolchain TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
 ```

@@ -1406,7 +1406,7 @@ class TestNativeLifecycle(unittest.TestCase):
         )
         self.fixture.calls.clear()
 
-    def execute(self, mode, ack=None):
+    def execute(self, mode, ack=None, **options):
         output = io.StringIO()
 
         def acknowledge(timeout):
@@ -1417,15 +1417,32 @@ class TestNativeLifecycle(unittest.TestCase):
                 "vmid": 1101,
                 "identity": guest_host.identity(self.req),
                 "verified": True,
-                "phase": "post-reboot" if event["phase"] == "reboot" else event["phase"],
+                "phase": {"reboot": "post-reboot", "ready": "proof"}.get(
+                    event["phase"], event["phase"]
+                ),
             }
 
         with (
             patch.object(guest_host, "read_line", side_effect=acknowledge),
             contextlib.redirect_stdout(output),
         ):
-            guest_host.session([self.req], mode)
+            guest_host.session([self.req], mode, **options)
         return [json.loads(line) for line in output.getvalue().splitlines()]
+
+    def test_clean_only_proof_restores_twice_and_preserves_template(self):
+        self.execute("apply")
+        self.fixture.calls.clear()
+        original = copy.deepcopy(self.fixture.template.config)
+        events = self.execute("proof", confirmed=True, exclusive=True)
+        self.assertEqual(
+            [event["phase"] for event in events],
+            ["prepared", "ready", "proof-reset", "prepared", "ready"],
+        )
+        rollbacks = [c for c in self.fixture.calls if c[:2] == ["qm", "rollback"]]
+        self.assertEqual(len(rollbacks), 2)
+        self.assertEqual(events[1]["snapshot_identity"], events[-1]["snapshot_identity"])
+        self.assertEqual(self.fixture.template.config, original)
+        self.assertEqual(self.fixture.guests[1101]["status"], "running")
 
     def test_replayed_preparation_ack_cannot_promote_after_reboot_request(self):
         guest_host.clone(self.req)
