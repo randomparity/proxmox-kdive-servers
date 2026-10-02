@@ -896,10 +896,8 @@ repository (`sudo dnf --enablerepo=crb install python3.14 python3.14-devel libgu
 this command does not persistently enable CRB. The configured distribution source
 repository must supply the matching signed libguestfs source RPM. The upstream play
 provides the Python 3.14 `guestfs` binding from that source.
-Ubuntu 26.04 and Fedora 44 have completed proofs.
-openSUSE is excluded;
-Rocky has verified clean, toolchain and kernel-source snapshots; KDIVE preparation
-is blocked by the upstream integration contracts described below.
+Ubuntu 26.04, Fedora 44 and Rocky 10.2 have completed installed-level proofs.
+openSUSE is excluded. The dated Rocky LVM-thin restore result is recorded below.
 
 ```sh
 make level LEVEL=kdive TARGETS=fedora
@@ -997,35 +995,51 @@ above `kernel-src` was 9,245.50 MiB written and 9,152.84 MiB additional referenc
 a single clean installation.
 
 
-### LVM-thin preparation result, 2026-10-02
+### LVM-thin restore proof, 2026-10-02
 
-Issue #41 remains incomplete: no Rocky `kdive` snapshot or clean-to-kdive restore
-proof was produced. The selected x86_64 guests were rebuilt with two authorized
-keys, and each retained verified no-RAM `clean`, `toolchain` and `kernel-src`
-snapshots on LVM-thin. Both public keys were checked in guest `authorized_keys`;
-only the login whose private key was available was exercised. Platforms were
-Fedora 44, openSUSE Leap 16.0, Rocky 10.2 and Ubuntu 26.04.1 LTS, on Proxmox VE
-9.2.20 with host kernel 7.0.14-17-pve. Kernel-source selection remained `v6.9`.
+Issue #41's live lower-to-higher restore proof passed on Rocky Linux 10.2 x86_64,
+using Proxmox VE 9.2.20 with host kernel 7.0.14-17-pve and LVM-thin storage.
+The controller was `cdcaaedee15a30ac6798f6fbab71090d9902ad92`; transmitted helpers
+matched that committed source. KDIVE was the operator-approved
+`81bd31a50d3c56e216d2e48dc10cf6196b41570e`, and kernel-source selection was `v6.9`.
 
-Rocky preparation used KDIVE `b6dfb269cc4b4f8cf27447e3621cb7cde1a32e7b` and
-controller `48da8936741e91909d76ceb380750788c11d8a41`, with matching transmitted
-helpers. Prerequisites admitted Python 3.14.7-2.el10_2 and its development headers,
-plus matching libguestfs/runtime headers 1.58.1-9.el10_2 from official repositories.
-A transient repository HTTP 503, missing system sbin lookup and missing build
-prerequisites were diagnosed separately; subsequent attempts began from a verified
-`kernel-src` restore. The shared command PATH now includes standard sbin directories.
+The current guest's `clean` baseline passed verification. Missing `toolchain`
+and `kernel-src` levels were prepared, captured without RAM, rebooted and verified.
+Rocky prerequisites were Python 3.14.7-2.el10_2 with matching development headers
+and libguestfs/runtime headers 1.58.1-9.el10_2 from official repositories; CRB was
+enabled only for the prerequisite install command. KDIVE preparation then passed
+runtime setup, the upstream host play, disposable local stack startup/shutdown,
+ancestor checks, no-RAM capture and post-boot verification.
 
-The final attempt reached the host play but failed because its root-owned uv
-0.12.22 was installed in `/usr/local/bin`, outside Rocky's sudo `secure_path`.
-Separately, upstream developer setup installed user-local shfmt v3.13.1 ahead of
-the ancestor's pinned v3.14.1, causing independent ancestor verification to fail.
-At that attempt, both integration conflicts remained unresolved; neither guard was bypassed.
-After preserving failure evidence, Rocky was restored to `kernel-src` and passed
-independent verification. The four rebuilt guests remain running at that baseline;
-no KDIVE restore, HTTP authorization, nested guest or kdump proof is claimed here.
+Both restore plans were reviewed before applying them with `TARGETS=rocky`,
+`APPLY=1`, `CONFIRM=rocky` and `EXCLUSIVE=1`. Each restore was followed by a
+separate verification invocation using the same private inventory:
 
-The controller now uses the runtime setup recipes and a fixed privileged PATH to
-address these two invocation conflicts. Focused regressions and a local Ansible/sudo
-probe verify the boundary changes; they do not establish successful Rocky preparation.
-The operator subsequently approved KDIVE `81bd31a50d3c56e216d2e48dc10cf6196b41570e`
-for the next attempt; the live clean-to-kdive restore proof remains pending.
+| Operation | Result | Wall time |
+| --- | --- | --- |
+| `make level LEVEL=kdive CAPTURE=1` | Captured and verified | 406.043 s |
+| `make restore LEVEL=clean` | Restored | 75.373 s |
+| `make verify LEVEL=clean` | Passed | 31.160 s |
+| `make restore LEVEL=kdive` | Restored | 102.167 s |
+| `make verify LEVEL=kdive` | Passed | 48.235 s |
+
+Independent native inspection confirmed the guest running on LVM-thin with
+`clean`, `toolchain`, `kernel-src` and `kdive` snapshots retained, each without RAM
+state. Final verification passed the installed KDIVE level and its ancestors;
+workers and the disposable stack remained stopped as required for this fixture.
+This proves the lower-to-higher path described in ADR0013. This run exercised no
+HTTP authorization, nested workload or kdump test, and made no template or other
+guest changes.
+
+Earlier attempts rebuilt Fedora 44, openSUSE Leap 16.0, Rocky 10.2 and Ubuntu
+26.04.1 LTS with two authorized keys and verified their lower snapshot chains.
+Both public keys were checked in `authorized_keys`; only the login with an
+available private key was exercised. Those are historical observations, not a
+fresh verification of the other guests in this run.
+
+Earlier Rocky preparation failures exposed a repository HTTP 503, missing native
+prerequisites, missing system sbin lookup, root uv outside sudo's `secure_path`,
+and developer setup replacing the ancestor's shfmt. The controller now supplies
+explicit system lookup paths and calls runtime setup recipes without developer
+tool installation. Focused regressions, a real Ansible/sudo probe and the live
+capture/restore proof passed; source admission and ancestor guards stayed enabled.
