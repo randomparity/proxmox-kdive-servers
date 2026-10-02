@@ -14,8 +14,9 @@ endif
 
 LEVEL ?= clean
 export CONFIRM EXCLUSIVE LEVEL CAPTURE
+export KDIVE_CHECKOUT KERNEL_BUNDLE GUEST_IMAGE OUTPUT OPERATOR_PREREQUISITES
 
-.PHONY: setup hooks lint syntax validate templates provision verify restore teardown level test check
+.PHONY: setup hooks lint syntax validate templates provision verify restore teardown level kdive-install-proof test check
 
 setup:
 	uv sync --locked
@@ -45,6 +46,9 @@ templates:
 
 provision:
 	.venv/bin/python scripts/guests.py
+
+kdive-install-proof:
+	.venv/bin/python scripts/install_proof.py
 
 verify:
 	.venv/bin/python scripts/guests.py --verify

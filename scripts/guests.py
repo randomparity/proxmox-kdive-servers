@@ -784,6 +784,7 @@ def dispatch(
                         in {
                             "plan": {"preserved", "would-create"},
                             "plan-restore": {"would-restore"},
+                            "plan-proof": {"would-restore"},
                             "plan-level": {"would-prepare-level"},
                             "plan-teardown": {"would-destroy", "absent"},
                             "apply": {"created", "preserved"},

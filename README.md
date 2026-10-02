@@ -603,19 +603,52 @@ is `clean`, and never capture a higher level on it. The example inventory names 
 restore semantics change. The `ubuntu`, `fedora` and `rocky` aliases stay the full-chain
 warm-fixture guests.
 
-Reset cycle for each proof:
-
-1. Restore `clean` before the proof, so it starts from the verified baseline.
-2. Run the installation proof and collect its results.
-3. Restore `clean` again afterwards, after releasing external services and artifacts.
-4. When a fresh guest identity is wanted, run `make teardown` then `make provision` instead.
-   Recreation changes guest SSH keys; follow the pin handling under
-   [Clean snapshot lifecycle](#clean-snapshot-lifecycle).
+Use the pinned upstream runner through the controller orchestration target:
 
 ```sh
-export TARGETS=ubuntu-install
-make restore APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1
+export TARGETS=fedora-install
+export KDIVE_CHECKOUT=/path/to/clean-pinned-kdive
+export KERNEL_BUNDLE=/path/to/upstream-kernel-bundle
+export GUEST_IMAGE=fedora-kdive-ready-44
+export OUTPUT=reports/install-proof-001
+make kdive-install-proof
+make kdive-install-proof APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1
 ```
+
+`KDIVE_CHECKOUT` must be clean at the exact commit in `vars/kdive-source.json`, with its own
+`.venv` synchronized using that checkout's instructions (Python 3.14). Prepare `KERNEL_BUNDLE`
+with the upstream `scripts.host_install_proof.py bundle` command on its verified kernel-fixture
+host. `GUEST_IMAGE` names an upstream catalog image matching the bundle architecture. This target
+does not build the bundle, synchronize KDIVE dependencies or install prerequisites on the guest.
+An optional `OPERATOR_PREREQUISITES=/path/to/script` passes an operator-owned UTF-8 script to
+upstream's existing option; review its contents before apply. The wrapper records its digest and
+supplies no default script. Missing prerequisites remain the runner's finding.
+
+The plan checks the inputs, ownership and clean-only snapshot state without changing the guest.
+Apply restores and verifies `clean`, runs the pinned controller-side runner over the inventory's
+strict SSH path, then restores and verifies `clean` again. Upstream transfers its pinned source.
+Existing lifecycle locks stay held through the sequence. Only one alias is accepted, and a guest
+with any higher snapshot is refused on both ZFS and LVM-thin storage; no snapshots are deleted.
+Ubuntu, Fedora and Rocky map to upstream debian, fedora and enterprise families. openSUSE is not
+supported by the upstream runner.
+
+Choose a new direct child of this checkout's ignored `reports/` directory for each run. The parent
+and run directory must be private (mode 0700). `upstream/` retains upstream evidence unchanged;
+`runner.log` contains private diagnostics. `provenance.json` separately binds the candidate,
+controller revision, verified initial/final snapshot identity and configuration, runner exit,
+reset verification, operator script digest and SHA-256 digests of retained upstream files.
+Do not publish these files without redaction: they can identify private infrastructure.
+
+Runner exits 0 (success), 1 (proof failure), 2 (invalid input) and 3 (blocked) are preserved.
+The stdout summary reports `runner_exit_code` and `reset_verified` separately. A reset failure
+makes an otherwise successful invocation fail; it does not replace a nonzero runner status.
+SIGINT/SIGTERM terminate the local runner process group before reset; timeout is 24 hours and
+returns 124. Signals during reset are deferred. A failure of the initial verification skips the
+runner but still attempts the final reset. A failed reset, lost transport, SIGKILL or power loss
+requires operator inspection; no automatic retry can claim the guest is clean.
+
+For a fresh guest identity, use `make teardown` then `make provision` instead. Recreation changes
+SSH keys; follow pin handling under [Clean snapshot lifecycle](#clean-snapshot-lifecycle).
 
 The dedicated guests are additional VMs beyond the warm-fixture guests. Each uses the sizing in
 [KDIVE installation validation sizing](#kdive-installation-validation-sizing), so run them

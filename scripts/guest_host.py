@@ -1179,6 +1179,39 @@ def lifecycle(request, mode, level="clean"):
     return None
 
 
+def proof_restore(request):
+    check(set(snapshot_rows(request)) == {"clean"}, "Proof requires only clean snapshots")
+    started = time.monotonic()
+    config = lifecycle(request, "restore")
+    emit(
+        request,
+        "ready",
+        action="restored",
+        config_sha256=template_host.digest(config),
+        duration_seconds=round(time.monotonic() - started, 3),
+        **baseline(request, config),
+    )
+
+
+def proof_session(request):
+    check(set(snapshot_rows(request)) == {"clean"}, "Proof requires only clean snapshots")
+    initial_ok = False
+    try:
+        proof_restore(request)
+        # Outlast the controller's 24-hour runner budget and bounded termination.
+        verify_ack(request, read_line(24 * 3600 + 120), phase="proof")
+        initial_ok = True
+    except (GuestError, guest_verify.GuestError, OSError, ValueError):
+        # Report the initial failure separately; cleanup still verifies its own restore.
+        initial_ok = False
+    finally:
+        try:
+            emit(request, "proof-reset", initial_ok=initial_ok)
+        finally:
+            # A broken controller output pipe must not prevent rollback and boot.
+            proof_restore(request)
+
+
 def session(requests, mode, confirmed=False, exclusive=False, level="clean", capture=False):
     check(
         mode
@@ -1192,6 +1225,8 @@ def session(requests, mode, confirmed=False, exclusive=False, level="clean", cap
             "plan-teardown",
             "level",
             "plan-level",
+            "proof",
+            "plan-proof",
         },
         "Invalid guest operation",
     )
@@ -1208,10 +1243,12 @@ def session(requests, mode, confirmed=False, exclusive=False, level="clean", cap
     )
     check(type(confirmed) is bool and type(exclusive) is bool, "Invalid destructive intent")
     check(
-        mode not in {"restore", "teardown", "level"} or confirmed and exclusive,
+        mode not in {"restore", "teardown", "level", "proof"} or confirmed and exclusive,
         "Destructive operation requires exact selected confirmation and exclusive use",
     )
     check(isinstance(requests, list) and 0 < len(requests) <= 100, "Invalid selected batch")
+    proof = mode in {"proof", "plan-proof"}
+    check(not proof or len(requests) == 1 and level == "clean", "Proof requires one clean guest")
     for request in requests:
         validate_request(request)
     with contextlib.ExitStack() as locks:
@@ -1221,7 +1258,17 @@ def session(requests, mode, confirmed=False, exclusive=False, level="clean", cap
                 {r["host"][key] for r in requests for key in ("vmid", "template_vmid")}
             ):
                 locks.enter_context(template_host.template_lock(vmid))
-        existing = admission(requests, mode, level)
+        existing = admission(requests, "restore" if proof else mode, level)
+        if proof:
+            check(
+                set(snapshot_rows(requests[0])) == {"clean"},
+                "Proof requires only clean snapshots",
+            )
+            if mode == "plan-proof":
+                emit(requests[0], "planned", action="would-restore")
+            else:
+                proof_session(requests[0])
+            return
         for request, present in zip(requests, existing, strict=True):
             started = time.monotonic()
             if mode.startswith("plan"):
