@@ -7,7 +7,7 @@ and native host helpers live in `scripts/`; Ansible entry points are in
 `playbooks/`, with reusable tasks in `roles/`. `inventory/example.yml` is the
 anonymous inventory contract. `vars/` holds pinned image, kernel, and KDIVE
 sources. Tests live in `tests/`; architecture decisions and design specifications
-are under `docs/adr/` and `docs/workflow/specs/`. Consult `README.md` for lifecycle
+are under `docs/adr/` and `docs/workflow/specs/`. Consult `docs/` for lifecycle
 procedures and prerequisites.
 
 ## Build, Test, and Development Commands
@@ -24,7 +24,7 @@ Controllers may be ARM64 or x86_64; managed guests target x86_64.
 - `make validate INVENTORY=inventory/private/lab.yml`: validate private inputs offline.
 
 Live `make templates` and `make provision` require explicit `TARGETS` and default
-to planning; review the plan before using `APPLY=1`. Follow the README for restore,
+to planning; review the plan before using `APPLY=1`. Follow `docs/` for restore,
 teardown, snapshot levels, and live verification.
 
 ## Coding Style & Naming Conventions
