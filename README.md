@@ -836,9 +836,9 @@ tooling, reuses them.
 
 `vars/kdive-source.json` selects an HTTPS repository and full commit for preparation only.
 The checkout lives at the operator's `~/src/kdive`; mismatching or dirty existing trees are
-preserved and refused. Preparation delegates `just setup` and the upstream local-libvirt
-host play. It requires installed Python 3.14 and its development headers before
-`just setup`, which builds native Python bindings. On Rocky, install the stock
+preserved and refused. Preparation delegates the runtime setup recipes listed below and
+the upstream local-libvirt host play. It requires installed Python 3.14 and its development
+headers before `just sync`, which builds native Python bindings. On Rocky, install the stock
 `python3.14` and `python3.14-devel` packages after capturing `kernel-src` and before
 preparing `kdive`. Also install matching `libguestfs-devel` from the existing CRB
 repository (`sudo dnf --enablerepo=crb install python3.14 python3.14-devel libguestfs-devel`);
