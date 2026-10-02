@@ -750,7 +750,8 @@ Removing the operator's docker membership independently produced
 `Toolchain operator missing docker group; restore toolchain or re-prepare`.
 Each fault was followed by a successful snapshot restore and re-verification.
 The final guest retained `clean` and `toolchain`, stopped with SELinux enforcing.
-Rocky's `kernel-src` and `kdive` levels remain unprepared and unverified.
+At that proof's conclusion, Rocky's `kernel-src` and `kdive` levels were unverified;
+see the later LVM-thin preparation result below.
 
 Measured snapshot allocation above `clean`:
 
@@ -836,10 +837,18 @@ tooling, reuses them.
 `vars/kdive-source.json` selects an HTTPS repository and full commit for preparation only.
 The checkout lives at the operator's `~/src/kdive`; mismatching or dirty existing trees are
 preserved and refused. Preparation delegates `just setup` and the upstream local-libvirt
-host play. It requires installed Python 3.14; the upstream play must provide its native
-`guestfs` binding. Ubuntu 26.04 and Fedora 44 have completed proofs.
+host play. It requires installed Python 3.14 and its development headers before
+`just setup`, which builds native Python bindings. On Rocky, install the stock
+`python3.14` and `python3.14-devel` packages after capturing `kernel-src` and before
+preparing `kdive`. Also install matching `libguestfs-devel` from the existing CRB
+repository (`sudo dnf --enablerepo=crb install python3.14 python3.14-devel libguestfs-devel`);
+this command does not persistently enable CRB. The configured distribution source
+repository must supply the matching signed libguestfs source RPM. The upstream play
+provides the Python 3.14 `guestfs` binding from that source.
+Ubuntu 26.04 and Fedora 44 have completed proofs.
 openSUSE is excluded;
-Rocky has a verified toolchain snapshot; its kernel-source and KDIVE preparation remain unverified.
+Rocky has verified clean, toolchain and kernel-source snapshots; KDIVE preparation
+is blocked by the upstream integration contracts described below.
 
 ```sh
 make level LEVEL=kdive TARGETS=fedora
@@ -928,3 +937,31 @@ Restore took 95.071 seconds; the test started 39.316 seconds after restore compl
 134.387 seconds after restore began (guest clock test-start marker). Historical ZFS measurement: native ZFS allocation
 above `kernel-src` was 9,245.50 MiB written and 9,152.84 MiB additional referenced data for
 a single clean installation.
+
+
+### LVM-thin preparation result, 2026-10-02
+
+Issue #41 remains incomplete: no Rocky `kdive` snapshot or clean-to-kdive restore
+proof was produced. The selected x86_64 guests were rebuilt with two authorized
+keys, and each retained verified no-RAM `clean`, `toolchain` and `kernel-src`
+snapshots on LVM-thin. Both public keys were checked in guest `authorized_keys`;
+only the login whose private key was available was exercised. Platforms were
+Fedora 44, openSUSE Leap 16.0, Rocky 10.2 and Ubuntu 26.04.1 LTS, on Proxmox VE
+9.2.20 with host kernel 7.0.14-17-pve. Kernel-source selection remained `v6.9`.
+
+Rocky preparation used KDIVE `b6dfb269cc4b4f8cf27447e3621cb7cde1a32e7b` and
+controller `48da8936741e91909d76ceb380750788c11d8a41`, with matching transmitted
+helpers. Prerequisites admitted Python 3.14.7-2.el10_2 and its development headers,
+plus matching libguestfs/runtime headers 1.58.1-9.el10_2 from official repositories.
+A transient repository HTTP 503, missing system sbin lookup and missing build
+prerequisites were diagnosed separately; subsequent attempts began from a verified
+`kernel-src` restore. The shared command PATH now includes standard sbin directories.
+
+The final attempt reached the host play but failed because its root-owned uv
+0.12.22 was installed in `/usr/local/bin`, outside Rocky's sudo `secure_path`.
+Separately, upstream developer setup installed user-local shfmt v3.13.1 ahead of
+the ancestor's pinned v3.14.1, causing independent ancestor verification to fail.
+These integration conflicts remain unresolved; neither guard was bypassed.
+After preserving failure evidence, Rocky was restored to `kernel-src` and passed
+independent verification. The four rebuilt guests remain running at that baseline;
+no KDIVE restore, HTTP authorization, nested guest or kdump proof is claimed here.
