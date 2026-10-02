@@ -1308,7 +1308,9 @@ def kdive_command(request, phase, script, timeout=120):
         "HOME=" + account.pw_dir,
         "USER=" + user,
         "LOGNAME=" + user,
-        "PATH=" + account.pw_dir + "/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH="
+        + account.pw_dir
+        + "/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
         "LANG=C.UTF-8",
         "DOCKER_HOST=unix:///var/run/docker.sock",
         "COMPOSE_PROJECT_NAME=" + KDIVE_PROJECT,

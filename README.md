@@ -868,7 +868,7 @@ as its operator with the same Compose identity and loopback override:
 ```sh
 cd ~/src/kdive
 env -i HOME="$HOME" USER="$(id -un)" LOGNAME="$(id -un)" \
-  PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+  PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin" LANG=C.UTF-8 \
   DOCKER_HOST=unix:///var/run/docker.sock COMPOSE_PROJECT_NAME=kdive-level \
   COMPOSE_FILE="$PWD/docker-compose.yml:/var/lib/kdive-levels/kdive-state/compose.yml" \
   UV_PYTHON_DOWNLOADS=never PYTHONDONTWRITEBYTECODE=1 bash --noprofile --norc

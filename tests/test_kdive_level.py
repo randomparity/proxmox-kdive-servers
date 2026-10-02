@@ -70,6 +70,29 @@ class KdiveContractTests(unittest.TestCase):
                 self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
                 self.assertIn("secret-dsn", logs[0].read_text())
 
+    def test_command_includes_trusted_system_sbin_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            account = SimpleNamespace(pw_dir=temp)
+            with (
+                patch.object(g, "kdive_context", return_value=("operator", account, Path(temp))),
+                patch.object(g, "KDIVE_STATE", Path(temp)),
+                patch.dict(os.environ, {"PATH": "/untrusted/bin:.:"}),
+                patch.object(
+                    g.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+                ) as run,
+            ):
+                g.kdive_command({}, "setup", "command -v ss tcpdump")
+            argv = run.call_args.args[0]
+            paths = next(value[5:] for value in argv if value.startswith("PATH=")).split(":")
+            self.assertIn("-i", argv)
+            self.assertEqual(
+                paths[:4], [temp + "/.local/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+            )
+            self.assertTrue({"/usr/local/sbin", "/usr/sbin", "/sbin"}.issubset(paths))
+            self.assertEqual(len(paths), 7)
+            self.assertNotIn("/untrusted/bin", paths)
+            self.assertTrue(all(path.startswith("/") for path in paths))
+
     def test_prepare_requires_genuine_fetched_main_to_match_pin(self):
         with tempfile.TemporaryDirectory() as temp:
             req = request()
