@@ -316,7 +316,7 @@ class TransportTests(unittest.TestCase):
         from scripts import install_proof
 
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             key = root / "key with space;%"
             key.write_text("test-key")
             pins = root / "known hosts"
@@ -378,7 +378,7 @@ class PreflightTests(unittest.TestCase):
         from scripts import install_proof
 
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             inventory = root / "lab.yml"
             inventory.write_bytes((install_proof.ROOT / "inventory/example.yml").read_bytes())
             (root / "known_hosts").touch(mode=0o600)
