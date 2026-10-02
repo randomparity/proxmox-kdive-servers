@@ -863,6 +863,13 @@ installed KDIVE lifecycle state. It creates an owned disposable local backend pr
 Postgres, SeaweedFS and OIDC publish only on guest loopback. There is no external witness
 DSN input. Captured witness credentials belong only to this disposable guest. Successful
 stop preserves local volumes; it independently verifies no host daemons or workers remain.
+
+Preparation invokes upstream `just sync`, `just build-capture-bootstrap-manifest` and
+`just install-ansible-collections` in order. It does not run developer setup or install
+Git hooks, so it preserves the ancestor's selected tools. The host play receives a fixed
+system-only PATH through Ansible's sudo options, including `/usr/local/bin` for root's
+installed `uv`; it does not change sudoers or pass the operator's user-local PATH to root.
+
 Installer failures retain root-private logs under `/var/lib/kdive-levels/kdive-state` and
 withhold READY. Inspect them privately; they can contain credentials. Automatic retries do
 not replace partial installations, snapshots, or ancestors. Preparation may take up to four
@@ -961,7 +968,13 @@ The final attempt reached the host play but failed because its root-owned uv
 0.12.22 was installed in `/usr/local/bin`, outside Rocky's sudo `secure_path`.
 Separately, upstream developer setup installed user-local shfmt v3.13.1 ahead of
 the ancestor's pinned v3.14.1, causing independent ancestor verification to fail.
-These integration conflicts remain unresolved; neither guard was bypassed.
+At that attempt, both integration conflicts remained unresolved; neither guard was bypassed.
 After preserving failure evidence, Rocky was restored to `kernel-src` and passed
 independent verification. The four rebuilt guests remain running at that baseline;
 no KDIVE restore, HTTP authorization, nested guest or kdump proof is claimed here.
+
+The controller now uses the runtime setup recipes and a fixed privileged PATH to
+address these two invocation conflicts. Focused regressions and a local Ansible/sudo
+probe verify the boundary changes; they do not establish successful Rocky preparation.
+The original approved KDIVE source remains selected until a replacement receives
+explicit approval, and the live clean-to-kdive restore proof remains pending.

@@ -1624,7 +1624,12 @@ def prepare_kdive(request):
         "test ! -e .env; test ! -e .live-stack-logs; "
         "uv python find --no-python-downloads --python-preference only-system 3.14",
     )
-    kdive_command(request, "setup", "just setup", 7200)
+    kdive_command(
+        request,
+        "setup",
+        "just sync\njust build-capture-bootstrap-manifest\njust install-ansible-collections",
+        7200,
+    )
     package_install = (
         "sudo -n apt-get install -y --no-install-recommends python3-packaging"
         if request["host"]["profile"] == "ubuntu"
@@ -1640,6 +1645,9 @@ def prepare_kdive(request):
     play_inputs = {
         "local_libvirt_host_operator_user": user,
         "local_libvirt_host_kernel_source": config["kernel_source"],
+        "ansible_become_flags": (
+            "-H -S -n PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+        ),
     }
     script = (
         "export KDIVE_LIFECYCLE_WITNESS_DATABASE_URL="

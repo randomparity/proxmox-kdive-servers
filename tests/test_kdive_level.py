@@ -8,6 +8,7 @@ import inspect
 import io
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -138,6 +139,52 @@ class KdiveContractTests(unittest.TestCase):
                 self.assertIn("python3-packaging", script)
                 self.assertIn("/usr/bin/python3 -I -B -c 'import packaging'", script)
                 self.assertLess(index, phases.index("host-install"))
+                host_script = run.call_args_list[phases.index("host-install")].args[2]
+                inputs = json.loads(shlex.split(host_script)[-1])
+                flags = shlex.split(inputs["ansible_become_flags"])
+                self.assertEqual(flags[:3], ["-H", "-S", "-n"])
+                self.assertEqual(
+                    flags[3:],
+                    ["PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"],
+                )
+
+    def test_setup_preserves_tools_and_stops_on_recipe_failure(self):
+        tree = ast.parse(inspect.getsource(g.prepare_kdive))
+        call = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "kdive_command"
+            and isinstance(n.args[1], ast.Constant)
+            and n.args[1].value == "setup"
+        )
+        script = ast.literal_eval(call.args[2])
+        boundary = """
+just() {
+    case "$1" in
+        setup) printf replaced > shfmt ;;
+        sync) test "$FAIL_SYNC" = 0 || return 17; touch synced ;;
+        build-capture-bootstrap-manifest) test -f synced; touch manifest ;;
+        install-ansible-collections) test -f manifest; touch collections ;;
+        *) return 18 ;;
+    esac
+}
+"""
+        for fail in ("0", "1"):
+            with self.subTest(fail_sync=fail), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                (root / "shfmt").write_text("ancestor-tool")
+                result = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", boundary + script],
+                    cwd=root,
+                    env=dict(os.environ, FAIL_SYNC=fail),
+                    check=False,
+                )
+                self.assertEqual((root / "shfmt").read_text(), "ancestor-tool")
+                self.assertEqual(result.returncode, 0 if fail == "0" else 17)
+                for artifact in ("synced", "manifest", "collections"):
+                    self.assertEqual((root / artifact).exists(), fail == "0")
 
     def test_installed_unit_checks_use_valid_instances(self):
         def systemctl(argv):
