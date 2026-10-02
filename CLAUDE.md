@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Controller-side tooling that builds verified Proxmox templates and full-clone x86_64 guests
 (Ubuntu, Fedora, Rocky, openSUSE) for KDIVE validation, with snapshot "levels" layered on a
-`clean` baseline. It does not install KDIVE itself outside the `kdive` level. `README.md` is the
-operator contract; `docs/adr/` records accepted decisions and `docs/workflow/specs/` the designs
-behind them.
+`clean` baseline. It does not install KDIVE itself outside the `kdive` level. `README.md`
+(overview and quick start) and the topic guides in `docs/*.md` are the operator contract;
+`docs/adr/` records accepted decisions and `docs/workflow/specs/` the designs behind them.
 
 ## Commands
 
