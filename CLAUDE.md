@@ -36,17 +36,22 @@ Live operations (need a private inventory, credentials and Proxmox access) are p
 mutation requires explicit flags:
 
 ```sh
-make templates|provision|verify|level|restore|teardown   # read-only plan / check
+make templates|provision|level|teardown   # read-only plan / check
+make verify OPERATION_TIMEOUT_SECONDS=7200
+make restore OPERATION_TIMEOUT_SECONDS=7200   # read-only restore plan
 make provision APPLY=1
 make kdive-install-proof  # one clean-only alias; requires pinned controller checkout/bundle/output
-make restore  APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1     # destructive ops also need CONFIRM+EXCLUSIVE
+make restore OPERATION_TIMEOUT_SECONDS=7200 APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1
 make level LEVEL=toolchain TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
 ```
 
 Environment knobs: `INVENTORY` (default `inventory/example.yml`), `TARGETS` (comma-separated
 aliases; omitted means all only for read-only validation), `APPLY`, `RESUME`, `CONFIRM`,
 `EXCLUSIVE`, `LEVEL` (default `clean`), `CAPTURE` (default off; `1` on `make level` captures,
-boots and verifies after preparation). Offline checks must always pass against the anonymous
+boots and verifies after preparation). `verify`/`restore` require explicit
+`OPERATION_TIMEOUT_SECONDS` in 21..86400 (including read-only restore plans), shared over the
+selected invocation with 20 seconds reserved for local cleanup. Timeout never proves remote
+completion or permits retry/release. Offline checks must always pass against the anonymous
 `inventory/example.yml`; the hook unsets `INVENTORY`/`TARGETS`.
 
 ## Architecture

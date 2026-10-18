@@ -66,7 +66,7 @@ With all templates ready, plan and create the four guests:
 make provision
 # After reviewing the plan:
 make provision APPLY=1
-make verify
+make verify OPERATION_TIMEOUT_SECONDS=7200
 ```
 
 Plans perform live admission checks; apply repeats admission before creation.
@@ -74,6 +74,18 @@ Provisioning verifies each guest's boot, networking, sizing, security enforcemen
 and nested-KVM baseline, captures a no-RAM `clean` snapshot, then boots and verifies again.
 `make verify` repeats verification without provisioning.
 These commands prepare the VMs; KDIVE installation is a separate step.
+
+Verify and restore require an explicit `OPERATION_TIMEOUT_SECONDS` in `21..86400` seconds,
+including read-only restore plans. The example value above is an operator-selected budget,
+not a maintenance recommendation. One monotonic budget covers admission and the complete
+selected guest set; its final 20 seconds are reserved for local transport cleanup.
+The direct Python CLI accepts `--operation-timeout-seconds` with the same contract.
+A cooperative expiry exits 124; a native hard expiry terminates with `SIGALRM`. Make can
+report its own failure status 2. These outcomes do not prove remote task completion: retain
+ownership and obtain independent state/task evidence before retrying, restoring or releasing.
+The bound covers the Python CLI under a responsive POSIX host, not an outer Make/shell
+process, remote tasks or an uninterruptible kernel. See [the deadline contract](
+docs/workflow/specs/2026-10-18-guest-operation-deadlines-design.md).
 
 **Capacity:** the example requests 32 vCPUs, 128 GiB RAM and 1 TiB of guest root
 disks, plus host headroom, templates and auxiliary disks. When new guests' vCPUs or
