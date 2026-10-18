@@ -315,6 +315,146 @@ with patch.object(guests, 'load_inventory', return_value=data), patch.object(
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["plan-restore"] * 2 + ["restore"] * 2)
 
+    def test_actual_cli_nested_verification_success_and_cooperative_expiry(self):
+        for expire in (False, True):
+            with self.subTest(expire=expire), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                transport = root / "transport.py"
+                transport.write_text("""
+import json, sys
+from pathlib import Path
+from scripts import guest_host
+role, directory = sys.argv[1:3]
+def record(event, vmid):
+    with (Path(directory) / 'events').open('a') as f:
+        f.write(json.dumps([event, vmid]) + '\\n')
+if role == 'host':
+    req = json.loads(sys.stdin.readline())['requests'][0]
+    vmid = req['host']['vmid']
+    record('host', vmid)
+    base = dict(vmid=vmid, identity=guest_host.identity(req))
+    print(json.dumps(dict(base, phase='prepared', fresh=False,
+                          guest_uuid='12345678-1234-1234-1234-123456789abc')), flush=True)
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(1)
+    ack = json.loads(line)
+    assert ack == dict(base, phase='prepared', verified=True)
+    record('ack', vmid)
+    print(json.dumps(dict(base, phase='ready', action='preserved', snapshot='clean',
+                          config_sha256='a'*64, snapshot_identity='b'*64,
+                          snapshot_config_sha256='c'*64, snapshot_time=1,
+                          duration_seconds=0)), flush=True)
+elif sys.argv[-1] == 'true':
+    record('probe', 0)
+else:
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(1)
+    envelope = json.loads(line)
+    assert envelope['fresh'] is False
+    req = envelope['request']; host = req['host']
+    record('rpc', host['vmid'])
+    print(json.dumps(dict(guest_uuid=req['guest_uuid'],
+        boot_id='12345678-1234-1234-1234-123456789abd',
+        os_id=host['profile'], release=req['template']['image']['release'],
+        architecture='x86_64', hostname=host['fqdn'].split('.')[0], fqdn=host['fqdn'],
+        ipv4=[host['ansible_host']], cpus=host['cores'],
+        memory_bytes=host['memory_mib']*1024**2, crash_reserved_bytes=0,
+        balloon_driver=True, filesystem_bytes=host['disk_gib']*1024**3,
+        security='apparmor-enforcing' if host['profile']=='ubuntu' else 'selinux-enforcing',
+        kvm_api=12, kvm_create_vm=True,
+        packages={key:'1.0' for key in
+                  ('cloud-init','openssh-server','sudo','qemu-guest-agent','python3')})))
+""")
+                (root / "known_hosts").touch(mode=0o600)
+                result = self.child(
+                    f"""
+import io, json, os, sys, time
+from pathlib import Path
+from unittest.mock import patch
+from scripts import guests, templates
+root = Path({directory!r}); transport = root / 'transport.py'
+for key in ('APPLY', 'CAPTURE', 'CONFIRM', 'EXCLUSIVE', 'LEVEL'):
+    os.environ.pop(key, None)
+data = guests.load_inventory(guests.ROOT / 'inventory/example.yml')
+for alias in ('fedora', 'fedora-install'):
+    data['_meta']['hostvars'][alias]['proxmox_node'] = 'other-node'
+responses = []
+for alias in ('ubuntu', 'fedora'):
+    host = data['_meta']['hostvars'][alias]
+    os.environ.update({{host[k]:'fixture' for k in templates.CREDENTIAL_REFS}})
+    source = dict(template=1,
+        scsi0=host['storage'] + ':base-' + str(host['template_vmid']) + '-disk-0,size=4G',
+        net0='virtio=02:11:22:33:44:55,bridge=' + host['bridge'],
+        description='kdive-template-v1:' + guests.guest_host.template_host.identity(
+            templates.request_for(host, False, False)) + ':ready')
+    responses.extend([{{'cpuinfo':{{'cpus':16}}, 'memory':{{'total':2**40}}}},
+                      {{'active':1,'enabled':1,'type':'zfspool','content':'images'}}, source])
+original_spawn = guests.OperationDeadline.spawn
+original_cleanup = guests.OperationDeadline.cleanup
+def spawn(self, argv, **kwargs):
+    process = original_spawn(self, argv, **kwargs)
+    # Exhaust only after a real nested RPC child exists, without scheduling-dependent sleeps.
+    if {expire!r} and len(argv)>3 and argv[1]==str(transport) and argv[2]=='guest' \
+            and argv[-1].startswith('sudo -n'):
+        self.work_end = time.monotonic() - 1
+        (root / 'expired').write_text(str(process.pid))
+    return process
+def cleanup(self):
+    original_cleanup(self)
+    assert all(p.returncode is not None for p in self.children), 'owned child not completed'
+    for process in self.children:
+        try:
+            os.waitpid(process.pid, os.WNOHANG)
+        except ChildProcessError:
+            continue
+        raise AssertionError('owned child was not reaped')
+    (root / 'cleanup').write_text(json.dumps([p.returncode for p in self.children]))
+sys.argv = ['guests.py', '--verify', '--targets', 'ubuntu,fedora',
+            '--inventory', str(root / 'fixture.yml'), '--operation-timeout-seconds', '60']
+with patch.dict(os.environ, {{'PYTHONPATH':str(guests.ROOT)}}), patch.object(
+    guests, 'load_inventory', return_value=data
+), patch.object(templates.ssl, 'create_default_context'), patch(
+    'urllib.request.OpenerDirector.open',
+    side_effect=[io.BytesIO(json.dumps({{'data':r}}).encode()) for r in responses]
+), patch.object(guests, 'host_ssh', side_effect=lambda *a:
+                [sys.executable,str(transport),'host',str(root)]), patch.object(
+    guests, 'guest_ssh', side_effect=lambda *a:
+                [sys.executable,str(transport),'guest',str(root)]
+), patch.object(guests.OperationDeadline, 'spawn', spawn), patch.object(
+    guests.OperationDeadline, 'cleanup', cleanup):
+    guests.main()
+""",
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 124 if expire else 0, result.stderr)
+                events = [json.loads(line) for line in (root / "events").read_text().splitlines()]
+                self.assertEqual(
+                    [vmid for event, vmid in events if event == "host"],
+                    [1101] if expire else [1101, 1102],
+                )
+                self.assertEqual(
+                    [vmid for event, vmid in events if event == "ack"],
+                    [] if expire else [1101, 1102],
+                )
+                self.assertEqual(
+                    [vmid for event, vmid in events if event == "rpc"],
+                    [] if expire else [1101, 1102],
+                )
+                self.assertEqual((root / "expired").exists(), expire)
+                self.assertEqual(
+                    len(json.loads((root / "cleanup").read_text())), 4 if expire else 7
+                )
+                if expire:
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("remote state unverified", result.stderr)
+                else:
+                    self.assertEqual(
+                        [json.loads(line)["profile"] for line in result.stdout.splitlines()],
+                        ["ubuntu", "fedora"],
+                    )
+
     def test_output_stall_cannot_turn_deadline_into_success(self):
         result = self.child("""
 import os, time
