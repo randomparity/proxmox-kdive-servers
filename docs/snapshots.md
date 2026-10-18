@@ -23,9 +23,9 @@ operator or application writing to the VM. KDIVE owns external state and result 
 export INVENTORY=inventory/private/lab.yml
 export TARGETS=ubuntu
 unset APPLY CONFIRM EXCLUSIVE
-make restore
+make restore OPERATION_TIMEOUT_SECONDS=7200
 # After reviewing the selected plan and releasing the consumer:
-make restore APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1
+make restore APPLY=1 CONFIRM="$TARGETS" EXCLUSIVE=1 OPERATION_TIMEOUT_SECONDS=7200
 ```
 
 Restore verifies the existing baseline before stopping a running guest, rolls back without RAM,
@@ -62,6 +62,7 @@ Equivalent separate playbooks retain protected private parsing/output:
 
 ```sh
 INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
+  OPERATION_TIMEOUT_SECONDS=7200 \
   .venv/bin/ansible-playbook -i localhost, playbooks/restore.yml
 INVENTORY=inventory/private/lab.yml TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1 \
   .venv/bin/ansible-playbook -i localhost, playbooks/teardown.yml

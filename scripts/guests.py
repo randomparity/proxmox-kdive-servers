@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import contextlib
 import json
 import math
 import os
@@ -9,6 +10,7 @@ import re
 import select
 import selectors
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -51,6 +53,122 @@ HOST_REASONS = {
     "storage-insufficient": "insufficient reported storage space; release storage before retry",
     "disk-too-small": "guest root disk is smaller than the template allocation; increase disk_gib",
 }
+
+
+class OperationExpired(Exception):
+    """The controller budget expired; remote completion remains unverified."""
+
+
+class OperationDeadline:
+    """Own one CLI lifetime; native SIGALRM remains effective during Python/C stalls."""
+
+    def __init__(self, seconds):
+        require(
+            isinstance(seconds, str)
+            and re.fullmatch(r"[0-9]+", seconds)
+            and 21 <= int(seconds) <= 86400,
+            "operation timeout",
+            "supply --operation-timeout-seconds INTEGER in 21..86400",
+        )
+        require(
+            signal.getsignal(signal.SIGALRM) == signal.SIG_DFL
+            and signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+            and signal.SIGALRM not in signal.pthread_sigmask(signal.SIG_BLOCK, set()),
+            "operation timeout",
+            "require an unblocked, unused SIGALRM timer",
+        )
+        self.end = time.monotonic() + int(seconds)
+        self.work_end = self.end - 20
+        self.children = []
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        self.arm(self.end)
+
+    def arm(self, cutoff):
+        remaining = cutoff - time.monotonic()
+        if remaining <= 0:
+            raise OperationExpired
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+
+    def remaining(self, maximum, *, cleanup=False):
+        remaining = (self.end if cleanup else self.work_end) - time.monotonic()
+        if remaining <= 0:
+            raise OperationExpired
+        return min(maximum, remaining)
+
+    @contextlib.contextmanager
+    def phase(self, seconds):
+        cutoff = min(self.work_end, time.monotonic() + seconds)
+        self.arm(cutoff)
+        try:
+            yield cutoff
+        finally:
+            self.arm(self.end)
+
+    def spawn(self, argv, **options):
+        self.remaining(1)
+        process = subprocess.Popen(argv, **options)
+        self.children.append(process)
+        self.remaining(1)
+        return process
+
+    def write(self, stream, data, *, cleanup=False):
+        fd = stream.fileno()
+        blocking = os.get_blocking(fd)
+        os.set_blocking(fd, False)
+        pending = memoryview(data)
+        try:
+            while pending:
+                wait = self.remaining(30, cleanup=cleanup)
+                if not select.select([], [fd], [], wait)[1]:
+                    raise OperationExpired
+                try:
+                    pending = pending[os.write(fd, pending[:4096]) :]
+                except BlockingIOError:
+                    continue
+        finally:
+            os.set_blocking(fd, blocking)
+
+    def cleanup(self):
+        failed = False
+        for process in self.children:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        failed = True
+        for action in ("terminate", "kill"):
+            cutoff = min(self.end, time.monotonic() + 5)
+            live = [p for p in self.children if p.poll() is None]
+            for process in live:
+                try:
+                    getattr(process, action)()
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    failed = True
+            for process in live:
+                remaining = cutoff - time.monotonic()
+                if remaining > 0:
+                    try:
+                        process.wait(timeout=remaining)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    except OSError:
+                        failed = True
+        require(
+            not failed and all(p.poll() is not None for p in self.children),
+            "local cleanup",
+            "transport termination unknown; retain ownership and inspect",
+        )
+
+
+def write_line(value, stream=None, operation_deadline=None):
+    stream = sys.stdout if stream is None else stream
+    if operation_deadline is None:
+        print(value, file=stream, flush=True)
+    else:
+        operation_deadline.write(stream, (value + "\n").encode())
 
 
 def request_for(host, revision, source):
@@ -162,17 +280,20 @@ def guest_ssh(host, known_hosts, fresh):
     return argv + ["--", host["ansible_host"]]
 
 
-def run_guest(argv, *, input=None, timeout):
-    deadline = time.monotonic() + timeout
+def run_guest(argv, *, input=None, timeout, operation_deadline=None, cwd=None):
+    budget = operation_deadline.remaining(timeout) if operation_deadline else timeout
+    deadline = time.monotonic() + budget
     pending = memoryview(input.encode() if input is not None else b"")
     output = {"stdout": bytearray(), "stderr": bytearray()}
     received = 0
-    process = subprocess.Popen(
+    spawn = operation_deadline.spawn if operation_deadline else subprocess.Popen
+    process = spawn(
         argv,
         stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
+        cwd=cwd,
     )
     try:
         with selectors.DefaultSelector() as selector:
@@ -187,6 +308,8 @@ def run_guest(argv, *, input=None, timeout):
                 else:
                     process.stdin.close()
             while selector.get_map():
+                if operation_deadline:
+                    operation_deadline.remaining(1)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(argv, timeout)
@@ -214,6 +337,8 @@ def run_guest(argv, *, input=None, timeout):
                     )
                     output[key.data].extend(chunk)
         code = process.wait(timeout=max(0, deadline - time.monotonic()))
+        if operation_deadline:
+            operation_deadline.remaining(1)
         try:
             return subprocess.CompletedProcess(
                 argv, code, output["stdout"].decode("utf-8"), output["stderr"].decode("utf-8")
@@ -224,12 +349,12 @@ def run_guest(argv, *, input=None, timeout):
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
-        if process.poll() is None:
+        if operation_deadline is None and process.poll() is None:
             process.kill()
             process.wait(timeout=5)
 
 
-def guest_rpc(request, known_hosts, envelope, timeout):
+def guest_rpc(request, known_hosts, envelope, timeout, operation_deadline=None):
     argv = guest_ssh(request["host"], known_hosts, False)
     source = (ROOT / "scripts/guest_verify.py").read_text()
     try:
@@ -237,6 +362,7 @@ def guest_rpc(request, known_hosts, envelope, timeout):
             argv + ["sudo -n python3 -c " + shlex.quote(source)],
             input=json.dumps(dict(envelope, request=request)),
             timeout=timeout,
+            **({"operation_deadline": operation_deadline} if operation_deadline else {}),
         )
     except (OSError, subprocess.TimeoutExpired):
         raise ValidationError(
@@ -273,7 +399,7 @@ def guest_rpc(request, known_hosts, envelope, timeout):
         raise ValidationError("Guest baseline: invalid result") from None
 
 
-def wait_guest(request, known_hosts, fresh, after_boot, booting=False):
+def wait_guest(request, known_hosts, fresh, after_boot, booting=False, operation_deadline=None):
     argv = guest_ssh(request["host"], known_hosts, fresh)
     deadline = time.monotonic() + (600 if fresh or after_boot or booting else 30)
     while True:
@@ -281,6 +407,7 @@ def wait_guest(request, known_hosts, fresh, after_boot, booting=False):
             probe = run_guest(
                 argv + ["cat /proc/sys/kernel/random/boot_id" if after_boot else "true"],
                 timeout=15,
+                **({"operation_deadline": operation_deadline} if operation_deadline else {}),
             )
         except (OSError, subprocess.TimeoutExpired):
             raise ValidationError(
@@ -294,17 +421,20 @@ def wait_guest(request, known_hosts, fresh, after_boot, booting=False):
             "Guest SSH",
             "readiness deadline expired; inspect network/keys/boot without retrying reboot",
         )
-        time.sleep(2)
+        time.sleep(operation_deadline.remaining(2) if operation_deadline else 2)
 
 
-def verify_guest(request, known_hosts, fresh, guest_uuid, after_boot=None, booting=False):
+def verify_guest(
+    request, known_hosts, fresh, guest_uuid, after_boot=None, booting=False, operation_deadline=None
+):
     request = dict(request, guest_uuid=guest_verify.machine_uuid(guest_uuid))
     prepare_known_hosts(known_hosts, fresh)
+    budget = {"operation_deadline": operation_deadline} if operation_deadline else {}
     if booting:
-        wait_guest(request, known_hosts, fresh, after_boot, booting=True)
+        wait_guest(request, known_hosts, fresh, after_boot, booting=True, **budget)
     else:
-        wait_guest(request, known_hosts, fresh, after_boot)
-    observed = guest_rpc(request, known_hosts, {"fresh": fresh}, 1800)
+        wait_guest(request, known_hosts, fresh, after_boot, **budget)
+    observed = guest_rpc(request, known_hosts, {"fresh": fresh}, 1800, **budget)
     try:
         guest_verify.validate_observation(request, observed)
         if after_boot:
@@ -488,13 +618,20 @@ def validate_event(request, event, phase, level="clean"):
         )
 
 
-def read_event(process):
-    deadline = time.monotonic() + 2400
+def read_event(process, operation_deadline=None):
+    deadline = time.monotonic() + (
+        operation_deadline.remaining(2400) if operation_deadline else 2400
+    )
     line = bytearray()
     while not line.endswith(b"\n"):
+        if operation_deadline:
+            operation_deadline.remaining(1)
         remaining = deadline - time.monotonic()
+        readable = remaining > 0 and select.select([process.stdout], [], [], remaining)[0]
+        if operation_deadline:
+            operation_deadline.remaining(1)
         require(
-            remaining > 0 and select.select([process.stdout], [], [], remaining)[0],
+            readable,
             "Native guest",
             "operation deadline expired; inspect partial allocation",
         )
@@ -522,11 +659,13 @@ def read_event(process):
     return event
 
 
-def read_admitted(process, host):
+def read_admitted(process, host, operation_deadline=None):
     """Print the host's leading capacity warnings, then return its first result event."""
     seen = set()
     while True:
-        event = read_event(process)
+        event = read_event(
+            process, **({"operation_deadline": operation_deadline} if operation_deadline else {})
+        )
         if not isinstance(event, dict) or event.get("phase") != "capacity-warning":
             return event
         require(
@@ -543,16 +682,26 @@ def read_admitted(process, host):
             "cpu": ("vCPUs", "logical CPUs observed free", "CPU"),
             "memory": ("MiB RAM", "MiB MemAvailable observed", "memory"),
         }[event["resource"]]
-        print(
+        write_line(
             f"Guest capacity warning: node {host['proxmox_node']} new guests request "
             f"{event['requested']} {unit}; {event['available']} {observed}; "
             f"guests may contend for {contended}",
-            file=sys.stderr,
-            flush=True,
+            stream=sys.stderr,
+            operation_deadline=operation_deadline,
         )
 
 
-def complete_level(process, request, event, mode, known_hosts, level, guest_uuid, capture=False):
+def complete_level(
+    process,
+    request,
+    event,
+    mode,
+    known_hosts,
+    level,
+    guest_uuid,
+    capture=False,
+    operation_deadline=None,
+):
     validate_event(request, event, "levels", level)
     require(
         event["guest_uuid"] == guest_uuid and event["prepare"] == (mode == "level"),
@@ -570,6 +719,7 @@ def complete_level(process, request, event, mode, known_hosts, level, guest_uuid
             "proposed": event["proposed"],
         },
         guest_verify.KDIVE_TIMEOUT if mode == "level" and level == "kdive" else 1800,
+        **({"operation_deadline": operation_deadline} if operation_deadline else {}),
     )
     ack = {
         "vmid": request["host"]["vmid"],
@@ -593,9 +743,14 @@ def complete_level(process, request, event, mode, known_hosts, level, guest_uuid
         ack["metadata"] = response["metadata"]
     else:
         require(response == {"verified": True}, "Guest level", "invalid verification result")
-    process.stdin.write((json.dumps(ack) + "\n").encode())
-    process.stdin.flush()
-    result = read_event(process)
+    if operation_deadline:
+        operation_deadline.write(process.stdin, (json.dumps(ack) + "\n").encode())
+    else:
+        process.stdin.write((json.dumps(ack) + "\n").encode())
+        process.stdin.flush()
+    result = read_event(
+        process, **({"operation_deadline": operation_deadline} if operation_deadline else {})
+    )
     if mode == "level":
         validate_event(request, result, "level-boot" if capture else "snapshot-ready", level)
         require(
@@ -654,19 +809,34 @@ def validate_level_event(request, event, level):
         require(event["proposed"] is None, "Native level", "unexpected proposed metadata")
 
 
-def complete_guest(process, request, event, mode, known_hosts, level="clean", capture=False):
+def complete_guest(
+    process,
+    request,
+    event,
+    mode,
+    known_hosts,
+    level="clean",
+    capture=False,
+    operation_deadline=None,
+):
     require(not event["fresh"] or mode == "apply", "Native guest", "unexpected mutation")
     guest_uuid, fresh = event["guest_uuid"], event["fresh"]
-    observations = verify_guest(request, known_hosts, fresh, guest_uuid, booting=mode == "restore")
+    budget = {"operation_deadline": operation_deadline} if operation_deadline else {}
+    observations = verify_guest(
+        request, known_hosts, fresh, guest_uuid, booting=mode == "restore", **budget
+    )
     ack = {
         "vmid": event["vmid"],
         "identity": event["identity"],
         "verified": True,
         "phase": "prepared",
     }
-    process.stdin.write((json.dumps(ack) + "\n").encode())
-    process.stdin.flush()
-    event = read_event(process)
+    if operation_deadline:
+        operation_deadline.write(process.stdin, (json.dumps(ack) + "\n").encode())
+    else:
+        process.stdin.write((json.dumps(ack) + "\n").encode())
+        process.stdin.flush()
+    event = read_event(process, **budget)
     if fresh and request["host"]["profile"] == "opensuse":
         validate_event(request, event, "reboot")
         require(event["guest_uuid"] == guest_uuid, "Native guest", "reboot UUID changed")
@@ -695,7 +865,7 @@ def complete_guest(process, request, event, mode, known_hosts, level="clean", ca
     if level != "clean":
         level_event = event
         event = complete_level(
-            process, request, event, mode, known_hosts, level, guest_uuid, capture
+            process, request, event, mode, known_hosts, level, guest_uuid, capture, **budget
         )
         if capture:
             metadata = event["metadata"]
@@ -729,40 +899,52 @@ def complete_guest(process, request, event, mode, known_hosts, level="clean", ca
 
 
 def dispatch(
-    requests, mode, known_hosts, confirmed=False, exclusive=False, level="clean", capture=False
+    requests,
+    mode,
+    known_hosts,
+    confirmed=False,
+    exclusive=False,
+    level="clean",
+    capture=False,
+    operation_deadline=None,
 ):
     argv = host_ssh(requests[0]["host"])
+    budget = {"operation_deadline": operation_deadline} if operation_deadline else {}
     try:
-        with subprocess.Popen(
+        spawn = operation_deadline.spawn if operation_deadline else subprocess.Popen
+        child = spawn(
             argv,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             bufsize=0,
-        ) as process:
+        )
+        with contextlib.nullcontext(child) if operation_deadline else child as process:
             try:
-                process.stdin.write(
-                    (
-                        json.dumps(
-                            {
-                                "requests": requests,
-                                "mode": mode,
-                                "confirmed": confirmed,
-                                "exclusive": exclusive,
-                                "level": level,
-                                "capture": capture,
-                            }
-                        )
-                        + "\n"
-                    ).encode()
-                )
-                process.stdin.flush()
+                payload = (
+                    json.dumps(
+                        {
+                            "requests": requests,
+                            "mode": mode,
+                            "confirmed": confirmed,
+                            "exclusive": exclusive,
+                            "level": level,
+                            "capture": capture,
+                        }
+                    )
+                    + "\n"
+                ).encode()
+                if operation_deadline:
+                    operation_deadline.write(process.stdin, payload)
+                else:
+                    process.stdin.write(payload)
+                    process.stdin.flush()
                 outcomes = []
                 for index, request in enumerate(requests):
                     event = (
-                        read_admitted(process, request["host"])
+                        read_admitted(process, request["host"], **budget)
                         if index == 0
-                        else read_event(process)
+                        else read_event(process, **budget)
                     )
                     if mode.startswith("plan"):
                         phase = "planned"
@@ -774,7 +956,7 @@ def dispatch(
                     observations = {}
                     if phase == "prepared":
                         event, observations = complete_guest(
-                            process, request, event, mode, known_hosts, level, capture
+                            process, request, event, mode, known_hosts, level, capture, **budget
                         )
                     if mode == "level" and not capture:
                         outcomes.append({"level": level, "metadata": event["metadata"]})
@@ -809,12 +991,29 @@ def dispatch(
                     )
                 process.stdin.close()
                 require(
-                    process.wait(timeout=30) == 0, "Native guest", "operation exited unsuccessfully"
+                    process.wait(
+                        timeout=(operation_deadline.remaining(30) if operation_deadline else 30)
+                    )
+                    == 0,
+                    "Native guest",
+                    "operation exited unsuccessfully",
                 )
+                if operation_deadline:
+                    require(
+                        select.select([process.stdout], [], [], operation_deadline.remaining(30))[
+                            0
+                        ],
+                        "Native guest",
+                        "output completion unknown",
+                    )
+                    operation_deadline.remaining(1)
                 require(not process.stdout.read(1), "Native guest", "unexpected trailing output")
                 return outcomes
             finally:
-                if process.poll() is None:
+                if operation_deadline:
+                    process.stdin.close()
+                    process.stdout.close()
+                elif process.poll() is None:
                     process.stdin.close()
                     try:
                         process.wait(timeout=10)
@@ -842,11 +1041,20 @@ def main():
     parser.add_argument("--capture", action="store_true", default=os.environ.get("CAPTURE") == "1")
     parser.add_argument("--level", default=os.environ.get("LEVEL", "clean"))
     parser.add_argument("--confirm", default=os.environ.get("CONFIRM"))
+    parser.add_argument("--operation-timeout-seconds")
     parser.add_argument(
         "--exclusive", action="store_true", default=os.environ.get("EXCLUSIVE") == "1"
     )
     args = parser.parse_args()
+    deadline = None
+    code = 1
+    diagnostic = None
     try:
+        require(
+            args.verify or args.restore or args.operation_timeout_seconds is None,
+            "operation timeout",
+            "only verify/restore accept an operation timeout",
+        )
         require(args.targets is not None, "targets", "select explicit comma-separated aliases")
         require(not args.apply or not args.verify, "operation", "verify does not accept apply")
         guest_verify.level_chain(args.level)
@@ -868,18 +1076,32 @@ def main():
             "restore/teardown/level apply requires CONFIRM matching exact TARGETS "
             "and EXCLUSIVE=1 after consumer release",
         )
+        if args.verify or args.restore:
+            deadline = OperationDeadline(args.operation_timeout_seconds)
+        budget = {"operation_deadline": deadline} if deadline else {}
         data = load_inventory(args.inventory)
         validate_inventory(data, args.targets)
         hosts = managed_hosts(data)
         pins = Path(args.inventory).absolute().parent / "known_hosts"
         known_hosts_option(pins)
-        revision = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-        ).strip()
+        if deadline:
+            revision_result = run_guest(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT, timeout=30, operation_deadline=deadline
+            )
+            require(
+                revision_result.returncode == 0 and not revision_result.stderr,
+                "controller source",
+                "cannot establish checkout revision",
+            )
+            revision = revision_result.stdout.strip()
+        else:
+            revision = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+            ).strip()
         groups = {}
         for alias in args.targets.split(","):
             host = hosts[alias]
-            source = templates.api_admission(host, source=True)
+            source = templates.api_admission(host, source=True, **budget)
             key = tuple(
                 host.get(k)
                 for k in (
@@ -918,6 +1140,7 @@ def main():
                     pins,
                     level=args.level,
                     capture=args.capture,
+                    **budget,
                 )
         for requests in groups.values():
             for index, result in enumerate(
@@ -929,6 +1152,7 @@ def main():
                     exclusive=args.exclusive,
                     level=args.level,
                     capture=args.capture,
+                    **budget,
                 )
             ):
                 if mode == "level" and not args.capture:
@@ -940,17 +1164,48 @@ def main():
                     print(f"READY TO SNAPSHOT {args.level} for {alias}", flush=True)
                     print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
                 else:
-                    print(json.dumps(result, sort_keys=True), flush=True)
+                    write_line(json.dumps(result, sort_keys=True), operation_deadline=deadline)
+        if deadline:
+            deadline.remaining(1)
+        code = 0
+    except OperationExpired:
+        code = 124
     except (ValidationError, guest_verify.GuestError) as error:
-        print(f"Guest operation failed: {error}", file=sys.stderr)
-        return 1
+        diagnostic = f"Guest operation failed: {error}"
+        if not deadline:
+            print(diagnostic, file=sys.stderr)
+        code = 1
     except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
-        print(
-            "Guest operation failed: invalid configuration or native result; inspect privately",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
+        if not deadline:
+            print(
+                "Guest operation failed: invalid configuration or native result; inspect privately",
+                file=sys.stderr,
+            )
+        code = 1
+    except KeyboardInterrupt:
+        if not deadline:
+            raise
+        code = 130
+    finally:
+        if deadline:
+            if time.monotonic() >= deadline.work_end and code != 130:
+                code = 124
+            try:
+                deadline.cleanup()
+            except (OSError, ValidationError, OperationExpired, subprocess.SubprocessError):
+                code = code or 1
+            if code:
+                with contextlib.suppress(OSError, OperationExpired):
+                    if diagnostic:
+                        deadline.write(sys.stderr, (diagnostic + "\n").encode(), cleanup=True)
+                    deadline.write(
+                        sys.stderr,
+                        b"Guest operation failed; remote state unverified; "
+                        b"retain ownership and inspect without retry\n",
+                        cleanup=True,
+                    )
+            os._exit(code)
+    return code
 
 
 if __name__ == "__main__":

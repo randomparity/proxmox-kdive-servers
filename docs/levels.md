@@ -62,8 +62,8 @@ has no such restriction; see the [storage guidance](templates.md#verified-templa
 make level LEVEL=toolchain TARGETS=ubuntu
 make level LEVEL=toolchain TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
 # Capture the emitted stopped, no-RAM snapshot using its exact metadata, then start the guest.
-make verify LEVEL=toolchain TARGETS=ubuntu
-make restore LEVEL=toolchain TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
+make verify LEVEL=toolchain TARGETS=ubuntu OPERATION_TIMEOUT_SECONDS=7200
+make restore LEVEL=toolchain TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1 OPERATION_TIMEOUT_SECONDS=7200
 ```
 
 Preparation installs distro packages, enables Docker and local libvirt, adds the configured
@@ -123,8 +123,8 @@ in `/var/lib/kdive-levels/kernel-src.json` and the emitted snapshot metadata.
 make level LEVEL=kernel-src TARGETS=ubuntu
 make level LEVEL=kernel-src TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
 # Capture the stopped guest with the exact emitted name/description and no RAM.
-make verify LEVEL=kernel-src TARGETS=ubuntu
-make restore LEVEL=kernel-src TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1
+make verify LEVEL=kernel-src TARGETS=ubuntu OPERATION_TIMEOUT_SECONDS=7200
+make restore LEVEL=kernel-src TARGETS=ubuntu APPLY=1 CONFIRM=ubuntu EXCLUSIVE=1 OPERATION_TIMEOUT_SECONDS=7200
 ```
 
 The existing `toolchain` parent must verify first. Git runs as the operator account at
@@ -181,8 +181,8 @@ openSUSE is excluded. The dated Rocky LVM-thin restore result is recorded in
 make level LEVEL=kdive TARGETS=fedora
 make level LEVEL=kdive TARGETS=fedora APPLY=1 CONFIRM=fedora EXCLUSIVE=1
 # Take the exact no-RAM snapshot only after READY, using its emitted metadata.
-make verify LEVEL=kdive TARGETS=fedora
-make restore LEVEL=kdive TARGETS=fedora APPLY=1 CONFIRM=fedora EXCLUSIVE=1
+make verify LEVEL=kdive TARGETS=fedora OPERATION_TIMEOUT_SECONDS=7200
+make restore LEVEL=kdive TARGETS=fedora APPLY=1 CONFIRM=fedora EXCLUSIVE=1 OPERATION_TIMEOUT_SECONDS=7200
 ```
 
 Preparation requires an exclusive guest with no existing Docker containers/volumes or

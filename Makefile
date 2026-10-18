@@ -14,6 +14,7 @@ endif
 
 LEVEL ?= clean
 export CONFIRM EXCLUSIVE LEVEL CAPTURE
+export OPERATION_TIMEOUT_SECONDS
 export KDIVE_CHECKOUT KERNEL_BUNDLE GUEST_IMAGE OUTPUT OPERATOR_PREREQUISITES
 
 .PHONY: setup hooks lint syntax validate templates provision verify restore teardown level kdive-install-proof test check
@@ -51,13 +52,13 @@ kdive-install-proof:
 	.venv/bin/python scripts/install_proof.py
 
 verify:
-	.venv/bin/python scripts/guests.py --verify
+	.venv/bin/python scripts/guests.py --verify --operation-timeout-seconds "$${OPERATION_TIMEOUT_SECONDS}"
 
 level:
 	.venv/bin/python scripts/guests.py --prepare-level
 
 restore:
-	.venv/bin/python scripts/guests.py --restore
+	.venv/bin/python scripts/guests.py --restore --operation-timeout-seconds "$${OPERATION_TIMEOUT_SECONDS}"
 
 teardown:
 	.venv/bin/python scripts/guests.py --teardown

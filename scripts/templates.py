@@ -1,6 +1,7 @@
 """Plan or import explicitly selected, verified Proxmox templates."""
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import signal
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -45,10 +47,26 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValidationError("API redirect refused; configure the direct verified endpoint")
 
 
-def api_admission(host, *, source=False):
-    def deadline_expired(signum, frame):
-        raise ValidationError("API admission exceeded its total deadline")
+@contextlib.contextmanager
+def admission_timer(operation_deadline):
+    if operation_deadline:
+        with operation_deadline.phase(API_TIMEOUT) as cutoff:
+            yield cutoff
+    else:
 
+        def expired(signum, frame):
+            raise ValidationError("API admission exceeded its total deadline")
+
+        previous_handler = signal.signal(signal.SIGALRM, expired)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, API_TIMEOUT)
+            yield None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+
+def api_admission(host, *, source=False, operation_deadline=None):
     values = [os.environ.get(host[field], "") for field in CREDENTIAL_REFS]
     require(
         all(value and not any(ord(c) < 32 or ord(c) == 127 for c in value) for value in values),
@@ -56,43 +74,44 @@ def api_admission(host, *, source=False):
         "set the referenced API credential environment variables",
     )
     user, token, secret = values
-    previous_handler = signal.signal(signal.SIGALRM, deadline_expired)
     try:
-        # Bound the complete admission even when a response keeps making slow progress.
-        signal.setitimer(signal.ITIMER_REAL, API_TIMEOUT)
-        context = ssl.create_default_context(cafile=host.get("proxmox_api_ca_file") or None)
-        opener = urllib.request.build_opener(
-            NoRedirect, urllib.request.HTTPSHandler(context=context)
-        )
-        base = f"https://{host['proxmox_api_host']}:{host.get('proxmox_api_port', 8006)}/api2/json"
-        responses = []
-        paths = [
-            f"/nodes/{host['proxmox_node']}/status",
-            f"/nodes/{host['proxmox_node']}/storage/{host['storage']}/status",
-        ]
-        if source:
-            paths.append(f"/nodes/{host['proxmox_node']}/qemu/{host['template_vmid']}/config")
-        for path in paths:
-            request = urllib.request.Request(
-                base + path, headers={"Authorization": f"PVEAPIToken={user}!{token}={secret}"}
+        with admission_timer(operation_deadline) as cutoff:
+            context = ssl.create_default_context(cafile=host.get("proxmox_api_ca_file") or None)
+            opener = urllib.request.build_opener(
+                NoRedirect, urllib.request.HTTPSHandler(context=context)
             )
-            with opener.open(request, timeout=30) as response:
-                raw = response.read(1024 * 1024 + 1)
-            require(len(raw) <= 1024 * 1024, "API", "response exceeded size bound")
-            result = json.loads(raw)
-            require(
-                isinstance(result, dict) and isinstance(result.get("data"), dict),
-                "API",
-                "missing positive node/storage evidence; check token audit permissions",
+            base = (
+                f"https://{host['proxmox_api_host']}:{host.get('proxmox_api_port', 8006)}/api2/json"
             )
-            responses.append(result["data"])
+            responses = []
+            paths = [
+                f"/nodes/{host['proxmox_node']}/status",
+                f"/nodes/{host['proxmox_node']}/storage/{host['storage']}/status",
+            ]
+            if source:
+                paths.append(f"/nodes/{host['proxmox_node']}/qemu/{host['template_vmid']}/config")
+            for path in paths:
+                request = urllib.request.Request(
+                    base + path, headers={"Authorization": f"PVEAPIToken={user}!{token}={secret}"}
+                )
+                timeout = 30
+                if operation_deadline:
+                    timeout = min(operation_deadline.remaining(30), cutoff - time.monotonic())
+                    require(timeout > 0, "API admission", "phase budget exhausted")
+                with opener.open(request, timeout=timeout) as response:
+                    raw = response.read(1024 * 1024 + 1)
+                require(len(raw) <= 1024 * 1024, "API", "response exceeded size bound")
+                result = json.loads(raw)
+                require(
+                    isinstance(result, dict) and isinstance(result.get("data"), dict),
+                    "API",
+                    "missing positive node/storage evidence; check token audit permissions",
+                )
+                responses.append(result["data"])
     except (OSError, urllib.error.URLError, ValueError):
         raise ValidationError(
             "API admission failed; check CA, endpoint and token audit permissions"
         ) from None
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
     node, storage = responses[:2]
     cpu = node.get("cpuinfo", {})
     memory = node.get("memory", {})

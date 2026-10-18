@@ -70,22 +70,37 @@ class KernelInputTests(unittest.TestCase):
 
     def test_controller_forwards_inputs_only_for_preparation(self):
         for operation in ("--prepare-level", "--verify", "--restore"):
-            with (
-                self.subTest(operation=operation),
-                patch.object(
-                    guests.sys,
-                    "argv",
-                    ["guests.py", operation, "--level", "kernel-src", "--targets", "ubuntu"],
-                ),
-                patch.object(guests, "validate_inventory"),
-                patch.object(guests.templates, "api_admission", return_value={}),
-                patch.object(guests, "request_for") as build_request,
-                patch.object(guests, "dispatch", return_value=[]) as dispatch,
-            ):
-                dispatch_request = {"host": {"vmid": 1101}, "template": {}, "revision": "a" * 40}
-                build_request.return_value = dispatch_request
-                self.assertEqual(guests.main(), 0)
-                forwarded = dispatch.call_args.args[0][0]
+            with self.subTest(operation=operation):
+                result = subprocess.run(
+                    [
+                        os.sys.executable,
+                        "-c",
+                        """
+import json, sys
+from unittest.mock import patch
+from scripts import guests
+operation = sys.argv[1]
+sys.argv = ['guests.py', operation, '--level', 'kernel-src', '--targets', 'ubuntu']
+if operation in ('--verify', '--restore'):
+    sys.argv += ['--operation-timeout-seconds', '60']
+def dispatch(requests, *args, **kwargs):
+    print(json.dumps(requests[0]), flush=True)
+    return []
+with patch.object(guests, 'validate_inventory'), patch.object(
+    guests.templates, 'api_admission', return_value={}
+), patch.object(guests, 'request_for', return_value={
+    'host': {'vmid': 1101}, 'template': {}, 'revision': 'a' * 40
+}), patch.object(guests, 'dispatch', side_effect=dispatch):
+    sys.exit(guests.main())
+""",
+                        operation,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                forwarded = json.loads(result.stdout)
                 self.assertEqual("kernel_source" in forwarded, operation == "--prepare-level")
 
     def test_native_bootstrap_executes_beyond_raw_argument_limit(self):

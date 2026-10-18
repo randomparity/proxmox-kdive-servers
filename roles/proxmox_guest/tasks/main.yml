@@ -4,7 +4,11 @@
     argv: >-
       {{ [ansible_playbook_python, playbook_dir + '/../scripts/guests.py'] +
          (['--' + proxmox_guest_operation] if proxmox_guest_operation is defined else
-          (['--verify'] if proxmox_guest_verify_only else [])) }}
+          (['--verify'] if proxmox_guest_verify_only else [])) +
+         (['--operation-timeout-seconds', lookup('ansible.builtin.env', 'OPERATION_TIMEOUT_SECONDS')]
+          if (proxmox_guest_operation | default(
+               'verify' if proxmox_guest_verify_only | default(false) else ''))
+             in ['verify', 'restore'] else []) }}
   register: proxmox_guest_result
   changed_when: >-
     proxmox_guest_result.stdout_lines | map('from_json') |

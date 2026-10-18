@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 STUB = """import sys
@@ -53,6 +54,35 @@ class TestGuestRoleWarnings(unittest.TestCase):
         self.assertIn("Guest capacity warning: node pve1 requests 8192 MiB", result.stdout)
         self.assertNotIn("stderr-secret", result.stdout)
         self.assertNotIn("stdout-secret", result.stdout)
+
+    def test_deadline_is_one_argument_only_for_verify_and_restore(self):
+        import json
+
+        script = self.work / "scripts" / "guests.py"
+        script.write_text(
+            "import json, sys\nfrom pathlib import Path\n"
+            "Path(__file__).with_suffix('.argv').write_text(json.dumps(sys.argv[1:]))\n"
+            'print(\'{"action": "preserved"}\')\n'
+        )
+        for variables, expected in [
+            ("proxmox_guest_verify_only: true", ["--verify"]),
+            ("proxmox_guest_operation: restore", ["--restore"]),
+            ("proxmox_guest_verify_only: false", []),
+        ]:
+            (self.work / "playbooks" / "run.yml").write_text(
+                PLAYBOOK.replace("proxmox_guest_verify_only: false", variables)
+            )
+            with (
+                self.subTest(variables=variables),
+                patch.dict(os.environ, {"OPERATION_TIMEOUT_SECONDS": "21 --apply"}),
+            ):
+                result = self.run_playbook()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                actual = json.loads(script.with_suffix(".argv").read_text())
+                self.assertEqual(
+                    actual,
+                    expected + (["--operation-timeout-seconds", "21 --apply"] if expected else []),
+                )
 
 
 if __name__ == "__main__":

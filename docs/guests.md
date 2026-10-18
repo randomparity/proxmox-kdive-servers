@@ -38,7 +38,7 @@ make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
 # Create only the selected absent, owned full clone and verify its baseline:
 make provision INVENTORY=inventory/private/lab.yml TARGETS=ubuntu APPLY=1
 # Reusable read-only verification, including after a separately managed restore:
-make verify INVENTORY=inventory/private/lab.yml TARGETS=ubuntu
+make verify INVENTORY=inventory/private/lab.yml TARGETS=ubuntu OPERATION_TIMEOUT_SECONDS=7200
 ```
 
 Use comma-separated exact aliases for multiple instances. All selected batches
@@ -135,6 +135,7 @@ The equivalent Ansible entrypoints use the same controller operation:
 INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
   .venv/bin/ansible-playbook -i localhost, playbooks/provision.yml
 INVENTORY=inventory/private/lab.yml TARGETS=ubuntu \
+  OPERATION_TIMEOUT_SECONDS=7200 \
   .venv/bin/ansible-playbook -i localhost, playbooks/verify.yml
 ```
 
